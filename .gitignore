@@ -1,3 +1,6 @@
+# NES ROM Files
+*.nes
+
 # Compiled Lua sources
 luac.out
 
