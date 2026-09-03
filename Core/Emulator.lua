@@ -352,14 +352,14 @@ local InstData = {
     
     EndInstruction()
   end,
-  [0xC4] = function() --CPX <$??
+  [0xC4] = function() --CPY <$??
     getAddrZP()
     if CycleTick == 2 then
       OpCPY(Read(AddressBus))
       EndInstruction()
     end
   end,
-  [0xCC] = function() --CPX $????
+  [0xCC] = function() --CPY $????
     getAddrAbs()
     if CycleTick == 3 then
       OpCPY(Read(AddressBus))
