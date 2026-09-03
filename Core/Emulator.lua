@@ -47,6 +47,7 @@ function Write(address, value)
 end
 --TODO: Organize Instructions
 --TODO: Add Unnoficial Instructions
+--Site i used for cycle info: https://www.atarihq.com/danb/files/64doc.txt
 local InstData = {
   [0x00] = function() --BRK
     if CycleTick == 1 then
@@ -432,49 +433,219 @@ local InstData = {
     
     EndInstruction()
   end,
-  [0x90] function() --BCC $????
+  [0x41] = function() --EOR (<$??, X)
+    getAddrIndX()
+    if CycleTick == 5 then
+      OpEOR(Read(AddressBus))
+      EndInstruction()
+    end
+  end,
+  [0x45] = function() --EOR <$??
+    getAddrZP()
+    if CycleTick == 2 then
+      OpEOR(Read(AddressBus))
+      EndInstruction()
+    end
+  end,
+  [0x49] = function() --EOR #$??
+    getAddrImm()
+    OpEOR(Read(AddressBus))
+    
+    EndInstruction()
+  end,
+  [0x4D] = function() --EOR $????
+    getAddrAbs()
+    if CycleTick == 3 then
+      OpEOR(Read(AddressBus))
+      EndInstruction()
+    end
+  end,
+  [0x51] = function() --EOR (<$??), Y
+    getAddrIndY(true)
+    if CycleTick == 5 then
+      OpEOR(Read(AddressBus))
+      EndInstruction()
+    end
+  end,
+  [0x55] = function() --EOR <$??, X
+    getAddrZPOffX()
+    if CycleTick == 3 then
+      OpEOR(Read(AddressBus))
+      EndInstruction()
+    end
+  end,
+  [0x59] = function() --EOR $????, Y
+    getAddrAbsOffY(true)
+    if CycleTick == 4 then
+      OpEOR(Read(AddressBus))
+      EndInstruction()
+    end
+  end,
+  [0x5D] = function() --EOR $????, X
+    getAddrAbsOffX(true)
+    if CycleTick == 4 then
+      OpEOR(Read(AddressBus))
+      EndInstruction()
+    end
+  end,
+  [0xE6] = function() --INC <$??
+    getAddrZP()
+    if CycleTick == 2 then
+      Read(AddressBus)
+    elseif CycleTick == 3 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpINC(DataBus)
+    else
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0xEE] = function() --INC $????
+    getAddrAbs()
+    if CycleTick == 3 then
+      Read(AddressBus)
+    elseif CycleTick == 4 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpINC(DataBus)
+    else
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0xF6] = function() --INC <$??, X
+    getAddrZPOffX()
+    if CycleTick == 3 then
+      Read(AddressBus)
+    elseif CycleTick == 4 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpINC(DataBus)
+    else
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0xFE] = function() --INC $????, X
+    getAddrAbsOffX(false)
+    if CycleTick == 4 then
+      Read(AddressBus)
+    elseif CycleTick == 5 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpINC(DataBus)
+    else
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0xE8] = function() --INX
+    Read(ProgramCounter) --Dummy Read :)
+    X = band(X + 1, 0xFF)
+    
+    ZeroFlag = X == 0
+    NegativeFlag = X > 127
+    
+    EndInstruction()
+  end,
+  [0xC8] = function() --INY
+    Read(ProgramCounter) --Dummy Read :)
+    Y = band(Y + 1, 0xFF)
+    
+    ZeroFlag = Y == 0
+    NegativeFlag = Y > 127
+    
+    EndInstruction()
+  end,
+  [0x4C] = function() --JMP $????
+    if CycleTick == 1 then
+      DataLatch = Read(ProgramCounter)
+      ProgramCounter = band(ProgramCounter + 1, 0xFFFF)
+    else
+      Read(ProgramCounter)
+      ProgramCounter = bor(lshift(DataBus, 8), DataLatch)
+      
+      EndInstruction()
+    end
+  end,
+  [0x6C] = function() --JMP ($????)
+    if CycleTick == 1 then
+      DataLatch = Read(ProgramCounter)
+      ProgramCounter = band(ProgramCounter + 1, 0xFFFF)
+    elseif CycleTick == 2 then
+      Read(ProgramCounter)
+      AddressBus = bor(lshift(DataBus, 8), DataLatch)
+    elseif CycleTick == 3 then
+      DataLatch = Read(AddressBus)
+    else
+      --Apparently there's a mistake i guess when crossing a page boundary
+      --The high byte of the Address Bus is not updated
+      Read(bor(band(AddressBus, 0xFF00), band(AddressBus + 1, 0xFF)))
+      ProgramCounter = bor(lshift(DataBus, 8), DataLatch)
+      
+      EndInstruction()
+    end
+  end,
+  [0x20] = function() --JSR $????
+    if CycleTick == 1 then
+      DataLatch = Read(ProgramCounter)
+      ProgramCounter = band(ProgramCounter + 1, 0xFFFF)
+    elseif CycleTick == 2 then
+      --Its said in the site i used that this is a internal operation
+      Read(0x100 + SP) --Dummy Read i guess
+    elseif CycleTick == 3 then
+      Write(0x100 + SP, rshift(ProgramCounter, 8))
+      SP = band(SP - 1, 0xFF)
+    elseif CycleTick == 4 then
+      Write(0x100 + SP, band(ProgramCounter, 0xFF))
+      SP = band(SP - 1, 0xFF)
+    else
+      Read(ProgramCounter)
+      ProgramCounter = bor(lshift(DataBus, 8), DataLatch)
+      
+      EndInstruction()
+    end
+  end
+  [0x90] = function() --BCC $????
     getAddrRel(not CarryFlag)
   end,
-  [0xB0] function() --BCS $????
+  [0xB0] = function() --BCS $????
     getAddrRel(CarryFlag)
   end,
-  [0xF0] function() --BEQ $????
+  [0xF0] = function() --BEQ $????
     getAddrRel(ZeroFlag)
   end,
-  [0x30] function() --BMI $????
+  [0x30] = function() --BMI $????
     getAddrRel(NegativeFlag)
   end,
-  [0xD0] function() --BNE $????
+  [0xD0] = function() --BNE $????
     getAddrRel(not ZeroFlag)
   end,
-  [0x10] function() --BPL $????
+  [0x10] = function() --BPL $????
     getAddrRel(not NegativeFlag)
   end,
-  [0x50] function() --BVC $????
+  [0x50] = function() --BVC $????
     getAddrRel(not OverflowFlag)
   end,
-  [0x70] function() --BVS $????
+  [0x70] = function() --BVS $????
     getAddrRel(OverflowFlag)
   end,
-  [0x18] function() --CLC
+  [0x18] = function() --CLC
     Read(ProgramCounter)
     CarryFlag = false
     
     EndInstruction()
   end,
-  [0xD8] function() --CLD
+  [0xD8] = function() --CLD
     Read(ProgramCounter)
     DecimalFlag = false
     
     EndInstruction()
   end,
-  [0x58] function() --CLI
+  [0x58] = function() --CLI
     Read(ProgramCounter)
     InterruptFlag = false
     
     EndInstruction()
   end,
-  [0xB8] function() --CLV
+  [0xB8] = function() --CLV
     Read(ProgramCounter)
     OverflowFlag = false
     
@@ -556,6 +727,12 @@ function OpDEC(value)
   
   ZeroFlag = value == 0
   NegativeFlag = value > 127
+end
+function OpEOR(value)
+  A = bxor(A, value)
+  
+  NegativeFlag = A > 127
+  ZeroFlag = A == 0
 end
 function OpINC(value)
   value = band(value + 1, 0xFF)
