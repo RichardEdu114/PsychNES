@@ -602,7 +602,293 @@ local InstData = {
       
       EndInstruction()
     end
-  end
+  end,
+  [0xA1] = function() --LDA (<$??, X)
+    getAddrIndX()
+    if CycleTick == 5 then
+      A = Read(AddressBus) 
+
+      NegativeFlag = A > 127 
+      ZeroFlag = A == 0
+      EndInstruction()
+    end
+  end,
+  [0xA5] = function() --LDA <$??
+    getAddrZP()
+    if CycleTick == 2 then
+      A = Read(AddressBus) 
+
+      NegativeFlag = A > 127 
+      ZeroFlag = A == 0
+      EndInstruction()
+    end
+  end,
+  [0xA9] = function() --LDA #$??
+    getAddrImm()
+    
+    A = Read(AddressBus) 
+    NegativeFlag = A > 127 
+    ZeroFlag = A == 0
+    
+    EndInstruction()
+  end,
+  [0xAD] = function() --LDA $????
+    getAddrAbs()
+    if CycleTick == 3 then
+      A = Read(AddressBus) 
+
+      NegativeFlag = A > 127 
+      ZeroFlag = A == 0
+      EndInstruction()
+    end
+  end,
+  [0xB1] = function() --LDA (<$??), Y
+    getAddrIndY(true)
+    if CycleTick == 5 then
+      A = Read(AddressBus) 
+
+      NegativeFlag = A > 127 
+      ZeroFlag = A == 0
+      EndInstruction()
+    end
+  end,
+  [0xB5] = function() --LDA <$??, X
+    getAddrZPOffX()
+    if CycleTick == 3 then
+      A = Read(AddressBus) 
+
+      NegativeFlag = A > 127 
+      ZeroFlag = A == 0
+      EndInstruction()
+    end
+  end,
+  [0xB9] = function() --LDA $????, Y
+    getAddrAbsOffY(true)
+    if CycleTick == 4 then
+      A = Read(AddressBus) 
+
+      NegativeFlag = A > 127 
+      ZeroFlag = A == 0
+      EndInstruction()
+    end
+  end,
+  [0xBD] = function() --LDA $????, X
+    getAddrAbsOffX(true)
+    if CycleTick == 4 then
+      A = Read(AddressBus) 
+
+      NegativeFlag = A > 127 
+      ZeroFlag = A == 0
+      EndInstruction()
+    end
+  end,
+  [0xA2] = function() --LDX #$??
+    getAddrImm()
+    
+    X = Read(AddressBus) 
+    NegativeFlag = X > 127 
+    ZeroFlag = X == 0
+    
+    EndInstruction()
+  end,
+  [0xA6] = function() --LDX <$??
+    getAddrZP()
+    if CycleTick == 2 then
+      X = Read(AddressBus) 
+
+      NegativeFlag = X > 127 
+      ZeroFlag = X == 0
+      EndInstruction()
+    end
+  end,
+  [0xAE] = function() --LDX $????
+    getAddrAbs()
+    if CycleTick == 3 then
+      X = Read(AddressBus) 
+
+      NegativeFlag = X > 127 
+      ZeroFlag = X == 0
+      EndInstruction()
+    end
+  end,
+  [0xB6] = function() --LDX <$??, Y
+    getAddrZPOffY()
+    if CycleTick == 3 then
+      X = Read(AddressBus) 
+
+      NegativeFlag = X > 127 
+      ZeroFlag = X == 0
+      EndInstruction()
+    end
+  end,
+  [0xBE] = function() --LDX $????, Y
+    getAddrAbsOffY(true)
+    if CycleTick == 4 then
+      X = Read(AddressBus) 
+
+      NegativeFlag = X > 127 
+      ZeroFlag = X == 0
+      EndInstruction()
+    end
+  end,
+  [0xA0] = function() --LDY #$??
+    getAddrImm()
+    
+    Y = Read(AddressBus) 
+    NegativeFlag = Y > 127 
+    ZeroFlag = Y == 0
+    
+    EndInstruction()
+  end,
+  [0xA4] = function() --LDY <$??
+    getAddrZP()
+    if CycleTick == 2 then
+      Y = Read(AddressBus) 
+
+      NegativeFlag = Y > 127 
+      ZeroFlag = Y == 0
+      EndInstruction()
+    end
+  end,
+  [0xAC] = function() --LDY $????
+    getAddrAbs()
+    if CycleTick == 3 then
+      Y = Read(AddressBus) 
+
+      NegativeFlag = Y > 127 
+      ZeroFlag = Y == 0
+      EndInstruction()
+    end
+  end,
+  [0xB4] = function() --LDY <$??, Y
+    getAddrZPOffY()
+    if CycleTick == 3 then
+      Y = Read(AddressBus) 
+
+      NegativeFlag = Y > 127 
+      ZeroFlag = Y == 0
+      EndInstruction()
+    end
+  end,
+  [0xBC] = function() --LDY $????, Y
+    getAddrAbsOffY(true)
+    if CycleTick == 4 then
+      Y = Read(AddressBus) 
+
+      NegativeFlag = Y > 127 
+      ZeroFlag = Y == 0
+      EndInstruction()
+    end
+  end,
+  [0x46] = function() --LSR <$??
+    getAddrZP()
+    if CycleTick == 2 then
+      Read(AddressBus)
+    elseif CycleTick == 3 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpLSR(DataBus)
+    else
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x4A] = function() --LSR A
+    Read(ProgramCounter)
+    OpLSRImpl()
+    
+    EndInstruction()
+  end,
+  [0x4E] = function() --LSR $????
+    getAddrAbs()
+    if CycleTick == 3 then
+      Read(AddressBus)
+    elseif CycleTick == 4 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpASL(DataBus)
+    else
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x56] = function() --LSR <$??, X
+    getAddrZPOffX()
+    if CycleTick == 3 then
+      Read(AddressBus)
+    elseif CycleTick == 4 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpLSR(DataBus)
+    else
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x5E] = function() --LSR $????, X
+    getAddrAbsOffX(false)
+    if CycleTick == 4 then
+      Read(AddressBus)
+    elseif CycleTick == 5 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpLSR(DataBus)
+    else
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x61] = function() --ORA (<$??, X)
+    getAddrIndX()
+    if CycleTick == 5 then
+      OpORA(Read(AddressBus))
+      EndInstruction()
+    end
+  end,
+  [0x65] = function() --ORA <$??
+    getAddrZP()
+    if CycleTick == 2 then
+      OpORA(Read(AddressBus))
+      EndInstruction()
+    end
+  end,
+  [0x69] = function() --ORA #$??
+    getAddrImm()
+    OpADC(Read(AddressBus))
+    
+    EndInstruction()
+  end,
+  [0x6D] = function() --ORA $????
+    getAddrAbs()
+    if CycleTick == 3 then
+      OpORA(Read(AddressBus))
+      EndInstruction()
+    end
+  end,
+  [0x71] = function() --ORA (<$??), Y
+    getAddrIndY(true)
+    if CycleTick == 5 then
+      OpORA(Read(AddressBus))
+      EndInstruction()
+    end
+  end,
+  [0x75] = function() --ORA <$??, X
+    getAddrZPOffX()
+    if CycleTick == 3 then
+      OpORA(Read(AddressBus))
+      EndInstruction()
+    end
+  end,
+  [0x79] = function() --ORA $????, Y
+    getAddrAbsOffY(true)
+    if CycleTick == 4 then
+      OpADC(Read(AddressBus))
+      EndInstruction()
+    end
+  end,
+  [0x7D] = function() --ORA $????, X
+    getAddrAbsOffX(true)
+    if CycleTick == 4 then
+      OpORA(Read(AddressBus))
+      EndInstruction()
+    end
+  end,
   [0x90] = function() --BCC $????
     getAddrRel(not CarryFlag)
   end,
@@ -648,6 +934,11 @@ local InstData = {
   [0xB8] = function() --CLV
     Read(ProgramCounter)
     OverflowFlag = false
+    
+    EndInstruction()
+  end,
+  [0xEA] = function() --NOP
+    Read(ProgramCounter)
     
     EndInstruction()
   end,
@@ -740,6 +1031,28 @@ function OpINC(value)
   
   ZeroFlag = value == 0
   NegativeFlag = value > 127
+end
+function OpLSRImpl()
+  CarryFlag = band(A, 1) == 1
+  A = band(rshift(A, 1), 0xFF)
+  
+  ZeroFlag = A == 0
+  NegativeFlag = A > 127
+end
+function OpLSR(value)
+  CarryFlag = band(value, 1) == 1
+  value = band(rshift(value, 1), 0xFF)
+  
+  ZeroFlag = value == 0
+  NegativeFlag = value > 127
+  
+  DataLatch = value
+end
+function OpORA(value)
+  A = bor(A, value)
+  
+  ZeroFlag = A == 0
+  NegativeFlag = A > 127
 end
 
 --Addressing Modes
