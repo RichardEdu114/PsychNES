@@ -6,7 +6,7 @@ local bit = require("bit")
 local bnot, band, bor, bxor, lshift, rshift, truncate = bit.bnot, bit.band, bit.bor, bit.bxor, bit.lshift, bit.rshift, math.modf
 
 --CPU
-local ProgramCounter = 0 
+local ProgramCounter = 0 --Where is the cpu reading
 local A = 0 
 local X = 0 
 local Y = 0
@@ -24,9 +24,9 @@ local InterruptFlag = true
 local OverflowFlag = false
 local NegativeFlag = false
 
-local DataBus = 0
-local DataLatch = 0
-local AddressBus = 0
+local DataBus = 0 --The most recently read value
+local DataLatch = 0 --Temporary value
+local AddressBus = 0 --Where is the cpu reading/writing
 local CycleTick = 0 --What cycle is this instruction on
 local TempAddr = 0 --Temporary address for some addressing modes
 
@@ -45,7 +45,126 @@ function Write(address, value)
     RAM[band(address, 0x7FF)] = value
   end
 end
-local InstData = {}
+--TODO: Organize Instructions
+--TODO: Add Unnoficial Instructions
+local InstData = {
+  [0x00] = function() --BRK
+    EndInstruction()
+  end,
+  [0x61] = function() --ADC (<$??, X)
+    getAddrIndX()
+    if CycleTick == 5 then
+      OpADC(Read(AddressBus))
+      EndInstruction()
+    end
+  end,
+  [0x65] = function() --ADC <$??
+    getAddrZP()
+    if CycleTick == 2 then
+      OpADC(Read(AddressBus))
+      EndInstruction()
+    end
+  end,
+  [0x69] = function() --ADC #$??
+    getAddrImm()
+    OpADC(Read(AddressBus))
+    
+    EndInstruction()
+  end,
+  [0x6D] = function() --ADC $????
+    getAddrAbs()
+    if CycleTick == 3 then
+      OpADC(Read(AddressBus))
+      EndInstruction()
+    end
+  end,
+  [0x71] = function() --ADC (<$??), Y
+    getAddrIndY(true)
+    if CycleTick == 5 then
+      OpADC(Read(AddressBus))
+      EndInstruction()
+    end
+  end,
+  [0x75] = function() --ADC <$??, X
+    getAddrZPOffX()
+    if CycleTick == 3 then
+      OpADC(Read(AddressBus))
+      EndInstruction()
+    end
+  end,
+  [0x79] = function() --ADC $????, Y
+    getAddrAbsOffY(true)
+    if CycleTick == 4 then
+      OpADC(Read(AddressBus))
+      EndInstruction()
+    end
+  end,
+  [0x7D] = function() --ADC $????, X
+    getAddrAbsOffX(true)
+    if CycleTick == 4 then
+      OpADC(Read(AddressBus))
+      EndInstruction()
+    end
+  end,
+  [0x21] = function() --AND (<$??, X)
+    getAddrIndX()
+    if CycleTick == 5 then
+      OpAND(Read(AddressBus))
+      EndInstruction()
+    end
+  end,
+  [0x25] = function() --AND <$??
+    getAddrZP()
+    if CycleTick == 2 then
+      OpAND(Read(AddressBus))
+      EndInstruction()
+    end
+  end,
+  [0x29] = function() --AND #$??
+    getAddrImm()
+    OpAND(Read(AddressBus))
+    
+    EndInstruction()
+  end,
+  [0x2D] = function() --AND $????
+    getAddrAbs()
+    if CycleTick == 3 then
+      OpAND(Read(AddressBus))
+      EndInstruction()
+    end
+  end,
+  [0x31] = function() --AND (<$??), Y
+    getAddrIndY(true)
+    if CycleTick == 5 then
+      OpAND(Read(AddressBus))
+      EndInstruction()
+    end
+  end,
+  [0x35] = function() --AND <$??, X
+    getAddrZPOffX()
+    if CycleTick == 3 then
+      OpAND(Read(AddressBus))
+      EndInstruction()
+    end
+  end,
+  [0x39] = function() --AND $????, Y
+    getAddrAbsOffY(true)
+    if CycleTick == 4 then
+      OpAND(Read(AddressBus))
+      EndInstruction()
+    end
+  end,
+  [0x3D] = function() --AND $????, X
+    getAddrAbsOffX(true)
+    if CycleTick == 4 then
+      OpAND(Read(AddressBus))
+      EndInstruction()
+    end
+  end,
+  [0x100] = function() --RESET
+    EndInstruction()
+  end
+}
 local opcode = 0
 function EmulateCPU()
   if CycleTick == 0 then
@@ -57,6 +176,26 @@ function EmulateCPU()
     CycleTick = CycleTick + 1
   end
 end
+--Official Opcodes
+function OpADC(value)
+  local sum = value + A + (CarryFlag and 1 or 0)
+  
+  local xor1 = bnot(bxor(A, value))
+  local xor2 = bxo3(A, sum)
+  
+  OverflowFlag = band(band(xor1, xor2), 0x80) ~= 0
+  CarryFlag = sum > 0xFF
+  A = band(sum, 0xFF)
+  NegativeFlag = A > 127
+  ZeroFlag = A == 0
+end
+function OpAND(value)
+  A = band(A, value)
+  
+  NegativeFlag = A > 127
+  ZeroFlag = A == 0
+end
+
 --Addressing Modes
 function getAddrImm()
   AddressBus = ProgramCounter
@@ -158,7 +297,7 @@ function getAddrIndY(isRead)
       CycleTick = CycleTick + 1
     end
   elseif CycleTick == 4 then
-    Read(AddressBus)
+    Read(AddressBus) --Dummy Read :)
     AddressBus = TempAddr
   end
 end
@@ -174,7 +313,7 @@ function getAddrRel(takeBranch)
     if DataLatch > 127 then
       DataLatch = DataLatch - 0x100
     end
-    TempAddr = ProgramCounter + DataLatch
+    TempAddr = band(ProgramCounter + DataLatch, 0xFFFF)
     ProgramCounter = bor(band(ProgramCounter, 0xFF00), band(ProgramCounter + DataLatch, 0xFF))
     if band(TempAddr, 0xFF00) == band(ProgramCounter, 0xFF00) then
       EndInstruction()
@@ -187,8 +326,8 @@ function getAddrRel(takeBranch)
 end
 function EndInstruction()
   CycleTick = 0
-  --Poll Interrupts Here
-  --Log Instruction Here
+  --Poll Interrupts Here For Now
+  --Log Instructions Here
 end
 function LoadROM(filepath)
   local data, message = love.filesystem.read(filepath)
@@ -207,6 +346,7 @@ function LoadROM(filepath)
   --TODO: Add NES 2.0 Support
 end
 function RESET()
+  --TODO: Add RESET Flag and "Instruction"
   local ROMToLoad = "Super Mario Bros. (World).nes"
   LoadROM("roms/" .. ROMToLoad)
   
