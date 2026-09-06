@@ -91,6 +91,8 @@ local ShiftRegPatt = ffi.new("uint8_t[8]")
 local ShiftRegXPos = ffi.new("uint8_t[8]")
 local ShiftRegYPos = ffi.new("uint8_t[8]")
 
+--Taken from 100'th Coin's "TriCNES" emulator. Because im too lazy to get the colors
+--TODO: Replace this with ".pal" file i guess
 local Pal = {
 0xFF656565, 0xFF002A84, 0xFF1513A2, 0xFF3A019E, 0xFF59007A, 0xFF6A003E, 0xFF680800, 0xFF531D00, 0xFF323400, 0xFF0D4600, 0xFF004F00, 0xFF004C09, 0xFF003F4B, 0xFF000000, 0xFF000000, 0xFF000000,
 0xFFAEAEAE, 0xFF175FD6, 0xFF4341FF, 0xFF7529FA, 0xFF9E1DCA, 0xFFB4207B, 0xFFB13322, 0xFF964E00, 0xFF6A6C00, 0xFF398400, 0xFF0F9000, 0xFF008D33, 0xFF007B8C, 0xFF000000, 0xFF000000, 0xFF000000,
