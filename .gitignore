@@ -3,6 +3,7 @@
 
 # Compiled Lua sources
 luac.out
+*.love
 
 # luarocks build files
 *.src.rock
