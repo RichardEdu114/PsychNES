@@ -1,5 +1,8 @@
 local Emulator = {}
 
+Emulator.Controller1 = 0
+
+local DoNMICounter = 0
 --Important things
 local ffi = require("ffi")
 local bit = require("bit")
@@ -12,6 +15,7 @@ local X = 0
 local Y = 0
 local SP = 0xFD 
 local RAM = ffi.new("uint8_t[0x800]")
+local PRGRAM = ffi.new("uint8_t[0x2000]")
 local ROM = {}
 local Header = ffi.new("uint8_t[16]")
 local DoNMI = false
@@ -30,16 +34,17 @@ local AddressBus = 0 --Where is the cpu reading/writing after a addressing mode
 local CycleTick = 0 --What cycle is this instruction on
 local TempAddr = 0 --Temporary address for some addressing modes
 
+local Controller1ShiftReg = 0
+local Controller2ShiftReg = 0
+
+local PPUBuffer = 0
+local TempVRAMAddress = 0
+
 --PPU Things
 ffi.cdef([[
   typedef struct {
-    uint8_t y, tile, attributes, x;
-  } OAM_Sprite;
-]])
-ffi.cdef([[
-  typedef struct {
     uint8_t r, g, b, a;
-  } Image_pixel;
+  } Image_Pixel;
 ]])
 
 local DrawFrame = false
@@ -69,14 +74,14 @@ local NametableSelect = 0
 local SpritePatternTable = false
 local BgPatternTable = false
 local Use8x16Sprites = false
-local NMIEnabled = true
+local NMIEnabled = false
 
-local OAM = ffi.new("OAM_Sprite[64]")
-local SecondaryOAM = ffi.new("OAM_Sprite[8]")
+local OAM = ffi.new("uint8_t[256]")
+local SecondaryOAM = ffi.new("uint8_t[32]")
 local SpriteZeroHit = false
 local SpriteOverflow = false
 local IsSpriteZero = false
-local SprTemp = false
+local SprDataLatch = 0
 local SecondaryOAMAddress = 0
 local SecondaryOAMSize = 0
 local SecondaryOAMFull = false
@@ -92,7 +97,7 @@ local ShiftRegXPos = ffi.new("uint8_t[8]")
 local ShiftRegYPos = ffi.new("uint8_t[8]")
 
 --Taken from 100'th Coin's "TriCNES" emulator. Because im too lazy to get the colors
---TODO: Replace this with ".pal" file i guess
+--TODO: Replace this with a ".pal" file i guess
 local Pal = {
 0xFF656565, 0xFF002A84, 0xFF1513A2, 0xFF3A019E, 0xFF59007A, 0xFF6A003E, 0xFF680800, 0xFF531D00, 0xFF323400, 0xFF0D4600, 0xFF004F00, 0xFF004C09, 0xFF003F4B, 0xFF000000, 0xFF000000, 0xFF000000,
 0xFFAEAEAE, 0xFF175FD6, 0xFF4341FF, 0xFF7529FA, 0xFF9E1DCA, 0xFFB4207B, 0xFFB13322, 0xFF964E00, 0xFF6A6C00, 0xFF398400, 0xFF0F9000, 0xFF008D33, 0xFF007B8C, 0xFF000000, 0xFF000000, 0xFF000000,
@@ -134,7 +139,7 @@ local Pal = {
 0xFFA6A6A6, 0xFF356BC5, 0xFF5654E3, 0xFF7B42E0, 0xFF9B39BB, 0xFFAB3C80, 0xFFA9493D, 0xFF955E04, 0xFF737500, 0xFF4E8700, 0xFF2F900E, 0xFF1E8E4A, 0xFF20808D, 0xFF232323, 0xFF000000, 0xFF000000,
 0xFFA6A6A6, 0xFF788EB3, 0xFF8585C0, 0xFF957DBE, 0xFFA279AF, 0xFFA87A96, 0xFFA8807B, 0xFF9F8964, 0xFF919257, 0xFF829A59, 0xFF759D68, 0xFF6E9C80, 0xFF6F979C, 0xFF707070, 0xFF000000, 0xFF000000,
 }
-local ColorData = ffi.new("Image_pixel[512]")
+local ColorData = ffi.new("Image_Pixel[512]")
 for i = 0, 511 do
   ColorData[i].r = rshift(band(Pal[i + 1], 0xFF0000), 16)
   ColorData[i].g = rshift(band(Pal[i + 1], 0x00FF00), 8)
@@ -155,7 +160,7 @@ local PPUAddressBus = 0
 local PPUDataLatch = 0
 
 local ImageData = love.image.newImageData(32 * 8, 30 * 8)
-local ImagePointer = ffi.cast("Image_pixel*", ImageData:getFFIPointer())
+local ImagePointer = ffi.cast("Image_Pixel*", ImageData:getFFIPointer())
 local Image = love.graphics.newImage(ImageData)
 
 --CPU Functions
@@ -187,6 +192,18 @@ function Read(address)
       
       DataBus = temp
     end
+  elseif address == 0x4016 then
+    local cbit = rshift(band(Controller1ShiftReg, 0x80), 7)
+    Controller1ShiftReg = lshift(Controller1ShiftReg, 1)
+    
+    DataBus = cbit
+  elseif address == 0x4017 then
+    local cbit = rshift(band(Controller2ShiftReg, 0x80), 7)
+    Controller2ShiftReg = lshift(Controller2ShiftReg, 1)
+    
+    DataBus = cbit
+  elseif address >= 0x6000 and address < 0x8000 then
+    DataBus = PRGRAM[address - 0x6000]
   elseif address >= 0x8000 then
     --TODO: Add Mapper Chips
     DataBus = ROM[band(address - 0x8000, 0x4000 * Header[4] - 1)]
@@ -206,14 +223,12 @@ function Write(address, value)
       BgPatternTable = band(value, 0x10) ~= 0
       Use8x16Sprites = band(value, 0x20) ~= 0
       NMIEnabled = band(value, 0x80) ~= 0
-      local cleared = band(TransferAddress, bnot(0xC00))
-      local shifted_new = lshift(band(NametableSelect, 3), 10)
-      TransferAddress = bor(cleared, shifted_new)
+      TransferAddress = bor(band(TransferAddress, bnot(0xC00)), lshift(band(NametableSelect, 3), 10))
     elseif address == 0x2001 then  --PPUMASK
       Grayscale = band(value, 1) ~= 0
       Mask8pxBg = band(value, 2) ~= 0
       Mask8pxSprites = band(value, 4) ~= 0
-      RenderBG = band(value, 8) ~= 0
+      RenderBg = band(value, 8) ~= 0
       RenderSprites = band(value, 0x10) ~= 0
       EmphasisColor = band(rshift(value, 5), 7)
     elseif address == 0x2002 then  --PPUSTATUS
@@ -261,6 +276,17 @@ function Write(address, value)
       VRAMAddress = VRAMAddress + (VRAMInc32Mode and 32 or 1)
       VRAMAddress = band(VRAMAddress, 0x3FFF)
     end
+  elseif address == 0x4014 then
+    --OAM DMA (simplified)
+    --TODO: un-sinplify this
+    for i = 0, 255 do
+      OAM[i] = Read(lshift(value, 8) + i)
+    end
+  elseif address == 0x4016 then
+    Controller1ShiftReg = Emulator.Controller1
+    Controller2ShiftReg = 0
+  elseif address >= 0x6000 and address < 0x8000 then
+    PRGRAM[address - 0x6000] = value
   end
 end
 --TODO: Organize Instructions
@@ -302,10 +328,10 @@ local InstData = {
       Read(DoNMI and 0xFFFB or 0xFFFF)
       ProgramCounter = bor(lshift(DataBus, 8), DataLatch)
       
+      EndInstruction()
+      
       DoNMI = false
       DoIRQ = false
-      
-      EndInstruction()
     end
   end,
   --Read-Modify-Write----------------------------
@@ -978,8 +1004,8 @@ local InstData = {
       EndInstruction()
     end
   end,
-  [0xB4] = function() --LDY <$??, Y
-    getAddrZPOffY()
+  [0xB4] = function() --LDY <$??, X
+    getAddrZPOffX()
     if CycleTick == 3 then
       Y = Read(AddressBus) 
 
@@ -988,8 +1014,8 @@ local InstData = {
       EndInstruction()
     end
   end,
-  [0xBC] = function() --LDY $????, Y
-    getAddrAbsOffY(true)
+  [0xBC] = function() --LDY $????, X
+    getAddrAbsOffX(true)
     if CycleTick == 4 then
       Y = Read(AddressBus) 
 
@@ -1022,7 +1048,7 @@ local InstData = {
       Read(AddressBus)
     elseif CycleTick == 4 then
       Write(AddressBus, DataBus) --Dummy Write :)
-      OpASL(DataBus)
+      OpLSR(DataBus)
     elseif CycleTick == 5 then
       Write(AddressBus, DataLatch)
       EndInstruction()
@@ -1068,7 +1094,7 @@ local InstData = {
   end,
   [0x09] = function() --ORA #$??
     getAddrImm()
-    OpADC(Read(AddressBus))
+    OpORA(Read(AddressBus))
     
     EndInstruction()
   end,
@@ -1096,7 +1122,7 @@ local InstData = {
   [0x19] = function() --ORA $????, Y
     getAddrAbsOffY(true)
     if CycleTick == 4 then
-      OpADC(Read(AddressBus))
+      OpORA(Read(AddressBus))
       EndInstruction()
     end
   end,
@@ -1142,6 +1168,10 @@ local InstData = {
       SP = band(SP + 1, 0xFF)
     elseif CycleTick == 3 then
       A = Read(0x100 + SP)
+      
+      ZeroFlag = A == 0
+      NegativeFlag = A > 127
+      
       EndInstruction()
     end
   end,
@@ -1586,8 +1616,6 @@ local InstData = {
 local opcode = 0
 function EmulateCPU()
   if CycleTick == 0 then
-    prev = opcode
-    prev2 = ProgramCounter
     if not DoNMI then
       opcode = Read(ProgramCounter)
       ProgramCounter = band(ProgramCounter + 1, 0xFFFF)
@@ -1597,9 +1625,11 @@ function EmulateCPU()
     CycleTick = CycleTick + 1
   else
     if InstData[opcode] == nil then
-      error(string.format("Missing Opcode 0x%02X at Address 0x%04X", prev, band(ProgramCounter - 1, 0xFFFF)))
+      --EndInstruction() --Just ignore
+      error(string.format("Missing Opcode 0x%02X at Address 0x%04X", opcode, band(ProgramCounter - 1, 0xFFFF)))
+    else
+      InstData[opcode]()
     end
-    InstData[opcode]()
     CycleTick = CycleTick + 1
   end
 end
@@ -1656,7 +1686,7 @@ end
 function OpCPY(value)
   CarryFlag = Y >= value
   ZeroFlag = Y == value
-  NegativeFlag = band(A - value, 0xFF) > 127
+  NegativeFlag = band(Y - value, 0xFF) > 127
 end
 function OpDEC(value)
   value = band(value - 1, 0xFF)
@@ -1721,7 +1751,7 @@ function OpROL(value)
   DataLatch = value
 end
 function OpRORImpl()
-  local carry = A > 127
+  local carry = band(A, 1) ~= 0
   A = band(rshift(A, 1), 0xFF)
   A = CarryFlag and bor(A, 0x80) or A
   
@@ -1730,7 +1760,7 @@ function OpRORImpl()
   ZeroFlag = A == 0
 end
 function OpROR(value)
-  local carry = value > 127
+  local carry = band(value, 1) ~= 0
   value = band(rshift(value, 1), 0xFF)
   value = CarryFlag and bor(value, 0x80) or value
   
@@ -1893,6 +1923,7 @@ function EndInstruction()
   end
   if not PreviousNMI and NMIDetector then
     DoNMI = true
+    DoNMICounter = DoNMICounter + 1
   end
   --Log Instructions Here
 end
@@ -1909,7 +1940,7 @@ function EmulatePPU()
   end
   
   if Scanline < 240 or Scanline == 261 then
-    --EvaluateSprites()
+    EvaluateSprites()
     if (Dot > 0 and Dot <= 256) or (Dot > 320 and Dot <= 336) then
       if RenderBg or RenderSprites then
         if RenderBg then
@@ -1917,6 +1948,16 @@ function EmulatePPU()
           ShiftRegPattHigh = lshift(ShiftRegPattHigh, 1)
           ShiftRegAttrLow = lshift(ShiftRegAttrLow, 1)
           ShiftRegAttrHigh = lshift(ShiftRegAttrHigh, 1)
+        end
+        if Dot > 1 and Dot <= 256 then
+          for i = 0, 7 do
+            if ShiftRegXPos[i] > 0 then
+               ShiftRegXPos[i] = ShiftRegXPos[i] - 1
+            else
+               ShiftRegL[i] = lshift(ShiftRegL[i], 1)
+               ShiftRegH[i] = lshift(ShiftRegH[i], 1)
+            end
+          end
         end
         local PPUCycleTick = band(Dot - 1, 7)
         if PPUCycleTick == 0 then
@@ -1971,7 +2012,7 @@ function EmulatePPU()
         IncrementYScroll()
       elseif Dot == 257 then
         ResetXScroll()
-      elseif Dot >= 280 and Dot <= 304 then
+      elseif Dot >= 280 and Dot <= 304 and Scanline == 261 then
         ResetYScroll()
       end
     end
@@ -1992,20 +2033,53 @@ function EmulatePPU()
         PalHigh = 0
       end
     end
-    local colidx = 0
+    local SpritePalLow = 0
+    local SpritePalHigh = 0
+    local SpritePriority = false
+    if RenderSprites and (Dot > 8 or Mask8pxSprites) then
+      for i = 0, 7 do
+        if ShiftRegXPos[i] == 0 and i < truncate(SecondaryOAMSize / 4) then
+          local pxLow = band(ShiftRegL[i], 0x80) ~= 0
+          local pxHigh = band(ShiftRegH[i], 0x80) ~= 0
+          SpritePalLow = 0
+          if pxLow then SpritePalLow = 1 end
+          if pxHigh then SpritePalLow = bor(SpritePalLow, 2) end
+        
+          SpritePalHigh = bor(band(ShiftRegAttr[i], 3), 4)
+          SpritePriority = band(rshift(ShiftRegAttr[i], 5), 1) == 0
+        else
+          goto continue
+        end
+        if SpritePalLow ~= 0 then
+          if i == 0 and IsSpriteZero and SpritePalLow ~= 0 and PalLow ~= 0 and RenderBg and Dot < 256 then
+            SpriteZeroHit = true
+          end
+          break
+        end
+        ::continue::
+      end
+    end 
+    if (SpritePriority and SpritePalLow ~= 0) or PalLow == 0 then
+      PalLow = SpritePalLow
+      PalHigh = SpritePalHigh
+      if PalLow == 0 then
+        PalHigh = 0
+      end
+    end
+    local palidx = 0
     if not RenderSprites and not RenderBg then
       if VRAMAddress >= 0x3F00 and VRAMAddress <= 0x3FFF then
-        colidx = PaletteRAM[band(VRAMAddress, 0x1F) + 1]
+        palidx = PaletteRAM[band(VRAMAddress, 0x1F)]
       else
-        colidx = PaletteRAM[PalLow + PalHigh * 4 + 1]
+        palidx = PaletteRAM[PalLow + PalHigh * 4]
       end
     else
-      colidx = PaletteRAM[PalLow + PalHigh * 4 + 1]
+      palidx = PaletteRAM[PalLow + PalHigh * 4]
     end
     if Grayscale then
-      colidx = band(colidx, 0x30)
+      palidx = band(palidx, 0x30)
     end
-    local coloridx = (EmphasisColor * 32 + colidx)
+    local coloridx = (EmphasisColor * 32 + palidx)
     local pixel = (Dot - 1 + (Scanline * 256))
     
     ImagePointer[pixel].r = ColorData[coloridx].r
@@ -2067,7 +2141,133 @@ function ResetYScroll()
   --0b0111101111100000 = 0x7BE0
   VRAMAddress = band(bor(band(VRAMAddress, 0x041F), band(TransferAddress, 0x7BE0)), 0xFFFF)
 end
+function EvaluateSprites()
+  if Dot == 0 then
+    SecondaryOAMAddress = 0
+    SecondaryOAMFull = false
+    EvalOAMOverflowed = false
+    IsSpriteZero = false
+  elseif Dot > 0 and Dot <= 64 then
+    if band(Dot, 1) == 1 then
+      SprDataLatch = 0xFF
+    else
+      SecondaryOAM[SecondaryOAMAddress] = SprDataLatch
+      SecondaryOAMAddress = SecondaryOAMAddress + 1
+      SecondaryOAMAddress = band(SecondaryOAMAddress, 0x1F)
+    end
+  elseif Dot > 64 and Dot <= 256 then
+    if band(Dot, 1) == 1 then
+      SprDataLatch = OAM[OAMAddress]
+    else
+      if not EvalOAMOverflowed then
+        if not SecondaryOAMFull then
+          SecondaryOAM[SecondaryOAMAddress] = SprDataLatch 
+        end
+        if SpriteEvalTick == 0 then
+          if Scanline - SprDataLatch >= 0 and Scanline - SprDataLatch < (Use8x16Sprites and 16 or 8) then
+            if not SecondaryOAMFull then
+              SecondaryOAMAddress = SecondaryOAMAddress + 1
+              OAMAddress = band(OAMAddress + 1, 0xFF)
+              if Dot == 66 then
+                IsSpriteZero = true
+              end
+            else
+              SpriteOverflow = true
+            end
+            SpriteEvalTick = SpriteEvalTick + 1
+          else
+            OAMAddress = band(OAMAddress + 4, 0xFF)
+          end
+        else
+          SecondaryOAMAddress = SecondaryOAMAddress + 1
+          OAMAddress = band(OAMAddress + 1, 0xFF)
+          if SecondaryOAMAddress == 0x20 then
+            SecondaryOAMFull = true
+          end
+          SpriteEvalTick = SpriteEvalTick + 1
+          SpriteEvalTick = band(SpriteEvalTick, 3)
+        end
+        if OAMAddress == 0 then
+          EvalOAMOverflowed = true
+        end
+      end
+    end
+  elseif Dot > 256 and Dot <= 320 then
+    OAMAddress = 0
+    if Dot == 257 then
+      SecondaryOAMSize = SecondaryOAMAddress
+      SecondaryOAMAddress = 0
+      SpriteEvalTick = 0
+    end
+    if SpriteEvalTick == 0 then
+      ShiftRegYPos[truncate(SecondaryOAMAddress / 4)] = SecondaryOAM[SecondaryOAMAddress]
+      SecondaryOAMAddress = SecondaryOAMAddress + 1
+    elseif SpriteEvalTick == 1 then
+      ShiftRegPatt[truncate(SecondaryOAMAddress / 4)] = SecondaryOAM[SecondaryOAMAddress]
+      SecondaryOAMAddress = SecondaryOAMAddress + 1
+    elseif SpriteEvalTick == 2 then
+      ShiftRegAttr[truncate(SecondaryOAMAddress / 4)] = SecondaryOAM[SecondaryOAMAddress]
+      SecondaryOAMAddress = SecondaryOAMAddress + 1
+    elseif SpriteEvalTick == 3 then
+      ShiftRegXPos[truncate(SecondaryOAMAddress / 4)] = SecondaryOAM[SecondaryOAMAddress]
+    elseif SpriteEvalTick == 4 then
+      PPUAddressBus = FindCharacterAddress(truncate(SecondaryOAMAddress / 4))
+    elseif SpriteEvalTick == 5 then
+      SprDataLatch = ReadPPU(PPUAddressBus)
+      if Scanline == 261 then
+        SprDataLatch = 0
+      end
+      if band(rshift(ShiftRegAttr[truncate(SecondaryOAMAddress / 4)], 6), 1) == 1 then
+        SprDataLatch = band(bor(rshift(band(SprDataLatch, 0xF0), 4), lshift(band(SprDataLatch, 0x0F), 4)), 0xFF)
+        SprDataLatch = band(bor(rshift(band(SprDataLatch, 0xCC), 2), lshift(band(SprDataLatch, 0x33), 2)), 0xFF)
+        SprDataLatch = band(bor(rshift(band(SprDataLatch, 0xAA), 1), lshift(band(SprDataLatch, 0x55), 1)), 0xFF)
+      end
+      ShiftRegL[truncate(SecondaryOAMAddress / 4)] = SprDataLatch
+    elseif SpriteEvalTick == 6 then
+      PPUAddressBus = PPUAddressBus + 8
+    elseif SpriteEvalTick == 7 then
+      SprDataLatch = ReadPPU(PPUAddressBus)
+      if Scanline == 261 then
+        SprDataLatch = 0
+      end
+      if band(rshift(ShiftRegAttr[truncate(SecondaryOAMAddress / 4)], 6), 1) == 1 then
+        SprDataLatch = band(bor(rshift(band(SprDataLatch, 0xF0), 4), lshift(band(SprDataLatch, 0x0F), 4)), 0xFF)
+        SprDataLatch = band(bor(rshift(band(SprDataLatch, 0xCC), 2), lshift(band(SprDataLatch, 0x33), 2)), 0xFF)
+        SprDataLatch = band(bor(rshift(band(SprDataLatch, 0xAA), 1), lshift(band(SprDataLatch, 0x55), 1)), 0xFF)
+      end
+      ShiftRegH[truncate(SecondaryOAMAddress / 4)] = SprDataLatch
+      SecondaryOAMAddress = SecondaryOAMAddress + 1
+    end
+   
+    SpriteEvalTick = SpriteEvalTick + 1
+    SpriteEvalTick = band(SpriteEvalTick, 7)
+  end
+end
+function FindCharacterAddress(slot) 
+  if not Use8x16Sprites then --8x8
+    if band(rshift(ShiftRegAttr[slot], 7), 1) == 0 then
+      return band((SpritePatternTable and 0x1000 or 0) + lshift(ShiftRegPatt[slot], 4) + (Scanline - ShiftRegYPos[slot]), 0xFFFF)
+    else
+      return band((SpritePatternTable and 0x1000 or 0) + lshift(ShiftRegPatt[slot], 4) + band((7 - (Scanline - ShiftRegYPos[slot])), 7), 0xFFFF)
+    end
+  else --8x16 (stupid)
+    if band(rshift(ShiftRegAttr[slot], 7), 1) == 0 then
+      if Scanline - ShiftRegYPos[slot] < 8 then
+        return band(bor((band(ShiftRegPatt[slot], 1) == 1 and 0x1000 or 0), band(lshift(ShiftRegPatt[slot], 4), 0xFE)) + (Scanline - ShiftRegYPos[slot]), 0xFFFF)
+      else
+        return band(bor((band(ShiftRegPatt[slot], 1) == 1 and 0x1000 or 0), band(lshift(ShiftRegPatt[slot], 4), 0xFE) + 16) + band(Scanline - ShiftRegYPos[slot], 7), 0xFFFF)
+      end
+    else
+      if Scanline - ShiftRegYPos[slot] < 8 then
+        return band(bor((band(ShiftRegPatt[slot], 1) == 1 and 0x1000 or 0), band(lshift(ShiftRegPatt[slot], 4), 0xFE) + 16) + (band(Scanline - ShiftRegYPos[slot], 7) + 7), 0xFFFF)
+      else
+        return band(bor((band(ShiftRegPatt[slot], 1) == 1 and 0x1000 or 0), band(lshift(ShiftRegPatt[slot], 4), 0xFE) + 7) + band(Scanline - ShiftRegYPos[slot], 7), 0xFFFF)
+      end
+    end
+  end
+end
 
+local MapperId = 0
 --Other Functions
 function LoadROM(filepath)
   local data, message = love.filesystem.read(filepath)
@@ -2084,18 +2284,20 @@ function LoadROM(filepath)
     ROM[i - 1] = string.byte(data, i + 0x10, i + 0x10)
   end
   --TODO: Add NES 2.0 Support
+  local mapperL = lshift(band(Header[6], 0xF0), 4)
+  MapperId = bor(band(Header[7], 0xF0), mapperL)
 end
 function CopyCHRData(address, length)
   for i = address, address + length do
     CHRData[i - address] = ROM[i]
   end
 end
+local ROMToLoad = "AccuracyCoin.nes"
 function RESET()
   --TODO: Add RESET Flag and "Instruction"
-  local ROMToLoad = "Super Mario Bros. (World).nes"
   LoadROM("roms/" .. ROMToLoad)
   if Header[5] ~= 0 then
-    CopyCHRData(0x4000 * Header[4] + 0x10, 0x2000)
+    CopyCHRData(0x4000 * Header[4], 0x2000)
   end
   
   local AddrLow = Read(0xFFFC)
@@ -2121,7 +2323,7 @@ function Emulator.Run()
   end
   
   --TODO: Remove this placeholder thing
-  return Image, ImageData
+  return Image, ImageData, "Fixed."
 end
 
 return Emulator
