@@ -5,6 +5,9 @@ local Emulator = require("Core.Emulator")
 local bit = require("bit")
 local bnot, band, bor, bxor, lshift, rshift, truncate = bit.bnot, bit.band, bit.bor, bit.bxor, bit.lshift, bit.rshift, math.modf
 
+--TODO: Properly check if the controllers are connected.
+--TODO: Add keyboard input
+--TODO: Add touch input
 local joystickTbl = love.joystick.getJoysticks()
 local joy1 = joystickTbl[1]
 

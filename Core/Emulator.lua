@@ -2,7 +2,6 @@ local Emulator = {}
 
 Emulator.Controller1 = 0
 
-local DoNMICounter = 0
 --Important things
 local ffi = require("ffi")
 local bit = require("bit")
@@ -39,6 +38,8 @@ local Controller2ShiftReg = 0
 
 local PPUBuffer = 0
 local TempVRAMAddress = 0
+
+local CPUClock = 0
 
 --PPU Things
 ffi.cdef([[
@@ -202,7 +203,7 @@ function Read(address)
     Controller2ShiftReg = lshift(Controller2ShiftReg, 1)
     
     DataBus = cbit
-  elseif address >= 0x6000 and address < 0x8000 then
+  elseif band(Header[6], 2) == 1 and address >= 0x6000 and address < 0x8000 then
     DataBus = PRGRAM[address - 0x6000]
   elseif address >= 0x8000 then
     --TODO: Add Mapper Chips
@@ -285,9 +286,10 @@ function Write(address, value)
   elseif address == 0x4016 then
     Controller1ShiftReg = Emulator.Controller1
     Controller2ShiftReg = 0
-  elseif address >= 0x6000 and address < 0x8000 then
+  elseif band(Header[6], 2) == 1 and address >= 0x6000 and address < 0x8000 then
     PRGRAM[address - 0x6000] = value
   end
+  DataBus = value --I did not know that even writing updated the data bus bruh
 end
 --TODO: Organize Instructions
 --TODO: Add Unnoficial Instructions
@@ -1487,6 +1489,754 @@ local InstData = {
       EndInstruction()
     end
   end,
+  [0x4B] = function() --ALR #??
+    getAddrImm()
+    
+    OpAND(Read(AddressBus))
+    OpLSRImpl()
+    
+    EndInstruction()
+  end,
+  [0x0B] = function() --ANC #??
+    getAddrImm()
+    
+    OpAND(Read(AddressBus))
+    CarryFlag = A > 127
+    
+    EndInstruction()
+  end,
+  [0x2B] = function() --ANC #??
+    getAddrImm()
+    
+    OpAND(Read(AddressBus))
+    CarryFlag = A > 127
+    
+    EndInstruction()
+  end,
+  [0x8B] = function() --ANE #??
+    getAddrImm()
+       
+    Read(AddressBus)
+    --Side note: 0xEE is a "magic" value
+    A = band(band(bor(A, 0xEE), X), DataBus)
+    NegativeFlag = A > 127
+    ZeroFlag = A == 0
+    
+    EndInstruction()
+  end,
+  [0x6B] = function() --ARR #??
+    getAddrImm()
+       
+    OpAND(Read(AddressBus))
+    OpRORImpl()
+    
+    CarryFlag = rshift(band(A, 0x40), 6) == 1
+    OverflowFlag = bxor(rshift(band(A, 0x20), 5), rshift(band(A, 0x40), 6)) == 1
+    
+    EndInstruction()
+  end,
+  [0xBB] = function() --LAS #??
+    getAddrAbsOffY(true)
+    
+    if CycleTick == 4 then  
+      Read(AddressBus)
+      DataLatch = band(DataBus, SP)
+      A = DataLatch
+      X = DataLatch
+      SP = DataLatch
+    
+      ZeroFlag = X == 0
+      NegativeFlag = X > 127
+    
+      EndInstruction()
+    end
+  end,
+  [0xAB] = function() --LXA #??
+    getAddrImm()
+       
+    Read(AddressBus)
+    --Side note: Same "magic" value as opcode 0x8B (ANE)
+    DataLatch = band(bor(A, 0xEE), DataBus)
+    A = DataLatch
+    X = DataLatch
+    
+    ZeroFlag = X == 0
+    NegativeFlag = X > 127
+    
+    EndInstruction()
+  end,
+  [0xCB] = function() --SBX #??
+    getAddrImm()
+       
+    Read(AddressBus)
+    X = band(X, A)
+    CarryFlag = X >= DataBus
+    X = band(X - DataBus, 0xFF)
+    ZeroFlag = X == 0
+    NegativeFlag = X > 127
+    
+    EndInstruction()
+  end,
+  [0x9F] = function() --SHA $????, Y
+    getAddrAbsOffY(false)
+    if CycleTick == 4 then
+      local HiAddr = band(rshift(band(AddressBus + 1, 0xFF00), 8), 0xFF)
+      
+      DataLatch = band(band(A, X), HiAddr)
+      Write(AddressBus, DataLatch)
+      
+      EndInstruction()
+    end
+  end,
+  [0x93] = function() --SHA ($??), Y
+    getAddrIndY(false)
+    if CycleTick == 5 then
+      local HiAddr = band(rshift(band(AddressBus + 1, 0xFF00), 8), 0xFF)
+      
+      DataLatch = band(band(A, X), HiAddr)
+      Write(AddressBus, DataLatch)
+      
+      EndInstruction()
+    end
+  end,
+  [0x9E] = function() --SHX $????, Y
+    getAddrAbsOffY(false)
+    if CycleTick == 4 then
+      local HiAddr = band(rshift(band(AddressBus + 1, 0xFF00), 8), 0xFF)
+      
+      DataLatch = band(X, HiAddr)
+      Write(AddressBus, DataLatch)
+      
+      EndInstruction()
+    end
+  end,
+  [0x9C] = function() --SHY $????, X
+    getAddrAbsOffX(false)
+    if CycleTick == 4 then
+      local HiAddr = band(rshift(band(AddressBus + 1, 0xFF00), 8), 0xFF)
+      
+      DataLatch = band(Y, HiAddr)
+      Write(AddressBus, DataLatch)
+      
+      EndInstruction()
+    end
+  end,
+  [0x9B] = function() --TAS $????, X
+    getAddrAbsOffX(false)
+    if CycleTick == 4 then
+      SP = band(A, X)
+      local HiAddr = band(rshift(band(AddressBus + 1, 0xFF00), 8), 0xFF)
+      
+      DataLatch = band(band(A, X), HiAddr)
+      Write(AddressBus, DataLatch)
+      
+      EndInstruction()
+    end
+  end,
+  [0xEB] = function() --USBC #$??
+    getAddrImm()
+    OpSBC(Read(AddressBus))
+    
+    EndInstruction()
+  end,
+  [0xC3] = function() --DCP ($??, X)
+    getAddrIndX()
+    if CycleTick == 5 then
+      Read(AddressBus)
+    elseif CycleTick == 6 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpDCP(DataBus)
+    elseif CycleTick == 7 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0xC7] = function() --DCP <$??
+    getAddrZP()
+    if CycleTick == 2 then
+      Read(AddressBus)
+    elseif CycleTick == 3 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpDCP(DataBus)
+    elseif CycleTick == 4 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0xCF] = function() --DCP $????
+    getAddrAbs()
+    if CycleTick == 3 then
+      Read(AddressBus)
+    elseif CycleTick == 4 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpDCP(DataBus)
+    elseif CycleTick == 5 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0xD3] = function() --DCP ($??), Y
+    getAddrIndY(false)
+    if CycleTick == 5 then
+      Read(AddressBus)
+    elseif CycleTick == 6 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpDCP(DataBus)
+    elseif CycleTick == 7 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0xD7] = function() --DCP <$??, X
+    getAddrZPOffX()
+    if CycleTick == 3 then
+      Read(AddressBus)
+    elseif CycleTick == 4 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpDCP(DataBus)
+    elseif CycleTick == 5 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0xDB] = function() --DCP $????, Y
+    getAddrAbsOffY(false)
+    if CycleTick == 4 then
+      Read(AddressBus)
+    elseif CycleTick == 5 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpDCP(DataBus)
+    elseif CycleTick == 6 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0xDF] = function() --DCP $????, X
+    getAddrAbsOffX(false)
+    if CycleTick == 4 then
+      Read(AddressBus)
+    elseif CycleTick == 5 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpDCP(DataBus)
+    elseif CycleTick == 6 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0xE3] = function() --ISC ($??, X)
+    getAddrIndX()
+    if CycleTick == 5 then
+      Read(AddressBus)
+    elseif CycleTick == 6 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpISC(DataBus)
+    elseif CycleTick == 7 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0xE7] = function() --ISC <$??
+    getAddrZP()
+    if CycleTick == 2 then
+      Read(AddressBus)
+    elseif CycleTick == 3 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpISC(DataBus)
+    elseif CycleTick == 4 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0xEF] = function() --ISC $????
+    getAddrAbs()
+    if CycleTick == 3 then
+      Read(AddressBus)
+    elseif CycleTick == 4 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpISC(DataBus)
+    elseif CycleTick == 5 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0xF3] = function() --ISC ($??), Y
+    getAddrIndY(false)
+    if CycleTick == 5 then
+      Read(AddressBus)
+    elseif CycleTick == 6 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpISC(DataBus)
+    elseif CycleTick == 7 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0xF7] = function() --ISC <$??, X
+    getAddrZPOffX()
+    if CycleTick == 3 then
+      Read(AddressBus)
+    elseif CycleTick == 4 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpISC(DataBus)
+    elseif CycleTick == 5 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0xFB] = function() --ISC $????, Y
+    getAddrAbsOffY(false)
+    if CycleTick == 4 then
+      Read(AddressBus)
+    elseif CycleTick == 5 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpISC(DataBus)
+    elseif CycleTick == 6 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0xFF] = function() --ISC $????, X
+    getAddrAbsOffX(false)
+    if CycleTick == 4 then
+      Read(AddressBus)
+    elseif CycleTick == 5 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpISC(DataBus)
+    elseif CycleTick == 6 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x23] = function() --RLA ($??, X)
+    getAddrIndX()
+    if CycleTick == 5 then
+      Read(AddressBus)
+    elseif CycleTick == 6 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpRLA(DataBus)
+    elseif CycleTick == 7 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x27] = function() --RLA <$??
+    getAddrZP()
+    if CycleTick == 2 then
+      Read(AddressBus)
+    elseif CycleTick == 3 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpRLA(DataBus)
+    elseif CycleTick == 4 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x2F] = function() --RLA $????
+    getAddrAbs()
+    if CycleTick == 3 then
+      Read(AddressBus)
+    elseif CycleTick == 4 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpRLA(DataBus)
+    elseif CycleTick == 5 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x33] = function() --RLA ($??), Y
+    getAddrIndY(false)
+    if CycleTick == 5 then
+      Read(AddressBus)
+    elseif CycleTick == 6 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpRLA(DataBus)
+    elseif CycleTick == 7 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x37] = function() --RLA <$??, X
+    getAddrZPOffX()
+    if CycleTick == 3 then
+      Read(AddressBus)
+    elseif CycleTick == 4 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpRLA(DataBus)
+    elseif CycleTick == 5 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x3B] = function() --RLA $????, Y
+    getAddrAbsOffY(false)
+    if CycleTick == 4 then
+      Read(AddressBus)
+    elseif CycleTick == 5 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpRLA(DataBus)
+    elseif CycleTick == 6 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x3F] = function() --RLA $????, X
+    getAddrAbsOffX(false)
+    if CycleTick == 4 then
+      Read(AddressBus)
+    elseif CycleTick == 5 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpRLA(DataBus)
+    elseif CycleTick == 6 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x63] = function() --RRA ($??, X)
+    getAddrIndX()
+    if CycleTick == 5 then
+      Read(AddressBus)
+    elseif CycleTick == 6 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpRRA(DataBus)
+    elseif CycleTick == 7 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x67] = function() --RRA <$??
+    getAddrZP()
+    if CycleTick == 2 then
+      Read(AddressBus)
+    elseif CycleTick == 3 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpRRA(DataBus)
+    elseif CycleTick == 4 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x6F] = function() --RRA $????
+    getAddrAbs()
+    if CycleTick == 3 then
+      Read(AddressBus)
+    elseif CycleTick == 4 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpRRA(DataBus)
+    elseif CycleTick == 5 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x73] = function() --RRA ($??), Y
+    getAddrIndY(false)
+    if CycleTick == 5 then
+      Read(AddressBus)
+    elseif CycleTick == 6 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpRRA(DataBus)
+    elseif CycleTick == 7 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x77] = function() --RRA <$??, X
+    getAddrZPOffX()
+    if CycleTick == 3 then
+      Read(AddressBus)
+    elseif CycleTick == 4 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpRRA(DataBus)
+    elseif CycleTick == 5 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x7B] = function() --RRA $????, Y
+    getAddrAbsOffY(false)
+    if CycleTick == 4 then
+      Read(AddressBus)
+    elseif CycleTick == 5 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpRRA(DataBus)
+    elseif CycleTick == 6 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x7F] = function() --RRA $????, X
+    getAddrAbsOffX(false)
+    if CycleTick == 4 then
+      Read(AddressBus)
+    elseif CycleTick == 5 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpRRA(DataBus)
+    elseif CycleTick == 6 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x03] = function() --SLO ($??, X)
+    getAddrIndX()
+    if CycleTick == 5 then
+      Read(AddressBus)
+    elseif CycleTick == 6 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpSLO(DataBus)
+    elseif CycleTick == 7 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x07] = function() --SLO <$??
+    getAddrZP()
+    if CycleTick == 2 then
+      Read(AddressBus)
+    elseif CycleTick == 3 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpSLO(DataBus)
+    elseif CycleTick == 4 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x0F] = function() --SLO $????
+    getAddrAbs()
+    if CycleTick == 3 then
+      Read(AddressBus)
+    elseif CycleTick == 4 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpSLO(DataBus)
+    elseif CycleTick == 5 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x13] = function() --SLO ($??), Y
+    getAddrIndY(false)
+    if CycleTick == 5 then
+      Read(AddressBus)
+    elseif CycleTick == 6 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpSLO(DataBus)
+    elseif CycleTick == 7 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x17] = function() --SLO <$??, X
+    getAddrZPOffX()
+    if CycleTick == 3 then
+      Read(AddressBus)
+    elseif CycleTick == 4 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpSLO(DataBus)
+    elseif CycleTick == 5 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x1B] = function() --SLO $????, Y
+    getAddrAbsOffY(false)
+    if CycleTick == 4 then
+      Read(AddressBus)
+    elseif CycleTick == 5 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpSLO(DataBus)
+    elseif CycleTick == 6 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x1F] = function() --SLO $????, X
+    getAddrAbsOffX(false)
+    if CycleTick == 4 then
+      Read(AddressBus)
+    elseif CycleTick == 5 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpSLO(DataBus)
+    elseif CycleTick == 6 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x43] = function() --SRE ($??, X)
+    getAddrIndX()
+    if CycleTick == 5 then
+      Read(AddressBus)
+    elseif CycleTick == 6 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpSRE(DataBus)
+    elseif CycleTick == 7 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x47] = function() --SRE <$??
+    getAddrZP()
+    if CycleTick == 2 then
+      Read(AddressBus)
+    elseif CycleTick == 3 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpSRE(DataBus)
+    elseif CycleTick == 4 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x4F] = function() --SRE $????
+    getAddrAbs()
+    if CycleTick == 3 then
+      Read(AddressBus)
+    elseif CycleTick == 4 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpSRE(DataBus)
+    elseif CycleTick == 5 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x53] = function() --SRE ($??), Y
+    getAddrIndY(false)
+    if CycleTick == 5 then
+      Read(AddressBus)
+    elseif CycleTick == 6 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpSRE(DataBus)
+    elseif CycleTick == 7 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x57] = function() --SRE <$??, X
+    getAddrZPOffX()
+    if CycleTick == 3 then
+      Read(AddressBus)
+    elseif CycleTick == 4 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpSRE(DataBus)
+    elseif CycleTick == 5 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x5B] = function() --SRE $????, Y
+    getAddrAbsOffY(false)
+    if CycleTick == 4 then
+      Read(AddressBus)
+    elseif CycleTick == 5 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpSRE(DataBus)
+    elseif CycleTick == 6 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0x5F] = function() --SRE $????, X
+    getAddrAbsOffX(false)
+    if CycleTick == 4 then
+      Read(AddressBus)
+    elseif CycleTick == 5 then
+      Write(AddressBus, DataBus) --Dummy Write :)
+      OpSRE(DataBus)
+    elseif CycleTick == 6 then
+      Write(AddressBus, DataLatch)
+      EndInstruction()
+    end
+  end,
+  [0xA3] = function() --LAX (<$??, X)
+    getAddrIndX()
+    if CycleTick == 5 then
+      A = Read(AddressBus) 
+      X = Read(AddressBus)
+      
+      NegativeFlag = X > 127 
+      ZeroFlag = X == 0
+      EndInstruction()
+    end
+  end,
+  [0xA7] = function() --LAX <$??
+    getAddrZP()
+    if CycleTick == 2 then
+      A = Read(AddressBus) 
+      X = Read(AddressBus) 
+
+      NegativeFlag = X > 127 
+      ZeroFlag = X == 0
+      EndInstruction()
+    end
+  end,
+  [0xAF] = function() --LAX $????
+    getAddrAbs()
+    if CycleTick == 3 then
+      A = Read(AddressBus) 
+      X = Read(AddressBus)
+
+      NegativeFlag = X > 127 
+      ZeroFlag = X == 0
+      EndInstruction()
+    end
+  end,
+  [0xB3] = function() --LAX (<$??), Y
+    getAddrIndY(true)
+    if CycleTick == 5 then
+      A = Read(AddressBus) 
+      X = Read(AddressBus)
+
+      NegativeFlag = X > 127 
+      ZeroFlag = X == 0
+      EndInstruction()
+    end
+  end,
+  [0xB7] = function() --LAX <$??, Y
+    getAddrZPOffY()
+    if CycleTick == 3 then
+      A = Read(AddressBus) 
+      X = Read(AddressBus)
+      
+      NegativeFlag = X > 127 
+      ZeroFlag = X == 0
+      EndInstruction()
+    end
+  end,
+  [0xBF] = function() --LAX $????, Y
+    getAddrAbsOffY(true)
+    if CycleTick == 4 then
+      A = Read(AddressBus) 
+      X = Read(AddressBus)
+
+      NegativeFlag = X > 127 
+      ZeroFlag = X == 0
+      EndInstruction()
+    end
+  end,
+  [0x83] = function() --SAX (<$??, X)
+    getAddrIndX()
+    if CycleTick == 5 then
+      Write(AddressBus, band(A, X))
+      EndInstruction()
+    end
+  end,
+  [0x87] = function() --SAX <$??
+    getAddrZP()
+    if CycleTick == 2 then
+      Write(AddressBus, band(A, X))
+      EndInstruction()
+    end
+  end,
+  [0x8F] = function() --SAX $????
+    getAddrAbs()
+    if CycleTick == 3 then
+      Write(AddressBus, band(A, X))
+      EndInstruction()
+    end
+  end,
+  [0x97] = function() --SAX <$??, Y
+    getAddrZPOffY()
+    if CycleTick == 3 then
+      Write(AddressBus, band(A, X))
+      EndInstruction()
+    end
+  end,
   [0x90] = function() --BCC $????
     getAddrRel(not CarryFlag)
   end,
@@ -1609,7 +2359,198 @@ local InstData = {
     
     EndInstruction()
   end,
-  [0x100] = function() --RESET
+  [0x1A] = function() --NOP
+    Read(ProgramCounter)
+    
+    EndInstruction()
+  end,
+  [0x3A] = function() --NOP
+    Read(ProgramCounter)
+    
+    EndInstruction()
+  end,
+  [0x5A] = function() --NOP
+    Read(ProgramCounter)
+    
+    EndInstruction()
+  end,
+  [0x7A] = function() --NOP
+    Read(ProgramCounter)
+    
+    EndInstruction()
+  end,
+  [0xDA] = function() --NOP
+    Read(ProgramCounter)
+    
+    EndInstruction()
+  end,
+  [0xFA] = function() --NOP
+    Read(ProgramCounter)
+    
+    EndInstruction()
+  end,
+  [0x80] = function() --NOP #??
+    getAddrImm()
+    Read(AddressBus)
+    
+    EndInstruction()
+  end,
+  [0x82] = function() --NOP #??
+    getAddrImm()
+    Read(AddressBus)
+    
+    EndInstruction()
+  end,
+  [0x89] = function() --NOP #??
+    getAddrImm()
+    Read(AddressBus)
+    
+    EndInstruction()
+  end,
+  [0xC2] = function() --NOP #??
+    getAddrImm()
+    Read(AddressBus)
+    
+    EndInstruction()
+  end,
+  [0xE2] = function() --NOP #??
+    getAddrImm()
+    Read(AddressBus)
+    
+    EndInstruction()
+  end,
+  [0x04] = function() --NOP <$??
+    getAddrZP()
+    if CycleTick == 2 then
+      Read(AddressBus)
+    
+      EndInstruction()
+    end
+  end,
+  [0x44] = function() --NOP <$??
+    getAddrZP()
+    if CycleTick == 2 then
+      Read(AddressBus)
+    
+      EndInstruction()
+    end
+  end,
+  [0x64] = function() --NOP <$??
+    getAddrZP()
+    if CycleTick == 2 then
+      Read(AddressBus)
+    
+      EndInstruction()
+    end
+  end,
+  [0x14] = function() --NOP <$??, X
+    getAddrZPOffX()
+    if CycleTick == 3 then
+      Read(AddressBus)
+    
+      EndInstruction()
+    end
+  end,
+  [0x34] = function() --NOP <$??, X
+    getAddrZPOffX()
+    if CycleTick == 3 then
+      Read(AddressBus)
+    
+      EndInstruction()
+    end
+  end,
+  [0x54] = function() --NOP <$??, X
+    getAddrZPOffX()
+    if CycleTick == 3 then
+      Read(AddressBus)
+    
+      EndInstruction()
+    end
+  end,
+  [0x74] = function() --NOP <$??, X
+    getAddrZPOffX()
+    if CycleTick == 3 then
+      Read(AddressBus)
+    
+      EndInstruction()
+    end
+  end,
+  [0xD4] = function() --NOP <$??, X
+    getAddrZPOffX()
+    if CycleTick == 3 then
+      Read(AddressBus)
+    
+      EndInstruction()
+    end
+  end,
+  [0xF4] = function() --NOP <$??, X
+    getAddrZPOffX()
+    if CycleTick == 3 then
+      Read(AddressBus)
+    
+      EndInstruction()
+    end
+  end,
+  [0x0C] = function() --NOP $????
+    getAddrAbs()
+    if CycleTick == 3 then
+      Read(AddressBus)
+    
+      EndInstruction()
+    end
+  end,
+  [0x1C] = function() --NOP $????, X
+    getAddrAbsOffX()
+    if CycleTick == 4 then
+      Read(AddressBus)
+    
+      EndInstruction()
+    end
+  end,
+  [0x3C] = function() --NOP $????, X
+    getAddrAbsOffX()
+    if CycleTick == 4 then
+      Read(AddressBus)
+    
+      EndInstruction()
+    end
+  end,
+  [0x5C] = function() --NOP $????, X
+    getAddrAbsOffX()
+    if CycleTick == 4 then
+      Read(AddressBus)
+    
+      EndInstruction()
+    end
+  end,
+  [0x7C] = function() --NOP $????, X
+    getAddrAbsOffX()
+    if CycleTick == 4 then
+      Read(AddressBus)
+    
+      EndInstruction()
+    end
+  end,
+  [0xDC] = function() --NOP $????, X
+    getAddrAbsOffX()
+    if CycleTick == 4 then
+      Read(AddressBus)
+    
+      EndInstruction()
+    end
+  end,
+  [0xFC] = function() --NOP $????, X
+    getAddrAbsOffX()
+    if CycleTick == 4 then
+      Read(AddressBus)
+    
+      EndInstruction()
+    end
+  end,
+  [0x100] = function() --OAM DMA
+    EndInstruction()
+  end,
+  [0x101] = function() --DMC DMA
     EndInstruction()
   end
 }
@@ -1624,12 +2565,9 @@ function EmulateCPU()
     end
     CycleTick = CycleTick + 1
   else
-    if InstData[opcode] == nil then
-      --EndInstruction() --Just ignore
-      error(string.format("Missing Opcode 0x%02X at Address 0x%04X", opcode, band(ProgramCounter - 1, 0xFFFF)))
-    else
-      InstData[opcode]()
-    end
+    local opcode = InstData[opcode]    
+    opcode()
+    
     CycleTick = CycleTick + 1
   end
 end
@@ -1783,6 +2721,32 @@ function OpSBC(value)
   ZeroFlag = A == 0
 end
 
+--Unnoficial Opcodes
+function OpDCP(value)
+  OpDEC(value)
+  OpCMP(DataLatch)
+end
+function OpISC(value)
+  OpINC(value)
+  OpSBC(DataLatch)
+end
+function OpRLA(value)
+  OpROL(value)
+  OpAND(DataLatch)
+end
+function OpRRA(value)
+  OpROR(value)
+  OpADC(DataLatch)
+end
+function OpSLO(value)
+  OpASL(value)
+  OpORA(DataLatch)
+end
+function OpSRE(value)
+  OpLSR(value)
+  OpEOR(DataLatch)
+end
+
 --Addressing Modes
 function getAddrImm()
   AddressBus = ProgramCounter
@@ -1835,7 +2799,7 @@ function getAddrAbsOffX(isRead)
       CycleTick = CycleTick + 1
     end
   elseif CycleTick == 3 then
-    Read(AddressBus)
+    Read(AddressBus) --Dummy Read :)
     AddressBus = TempAddr
   end
 end
@@ -1914,6 +2878,7 @@ end
 local NMIDetector = false
 function EndInstruction()
   CycleTick = -1
+  
   --Poll Interrupts Here For Now
   local PreviousNMI = NMIDetector
   if NMIEnabled and Vblank then
@@ -1923,7 +2888,6 @@ function EndInstruction()
   end
   if not PreviousNMI and NMIDetector then
     DoNMI = true
-    DoNMICounter = DoNMICounter + 1
   end
   --Log Instructions Here
 end
@@ -2146,7 +3110,6 @@ function EvaluateSprites()
     SecondaryOAMAddress = 0
     SecondaryOAMFull = false
     EvalOAMOverflowed = false
-    IsSpriteZero = false
   elseif Dot > 0 and Dot <= 64 then
     if band(Dot, 1) == 1 then
       SprDataLatch = 0xFF
@@ -2284,8 +3247,6 @@ function LoadROM(filepath)
     ROM[i - 1] = string.byte(data, i + 0x10, i + 0x10)
   end
   --TODO: Add NES 2.0 Support
-  local mapperL = lshift(band(Header[6], 0xF0), 4)
-  MapperId = bor(band(Header[7], 0xF0), mapperL)
 end
 function CopyCHRData(address, length)
   for i = address, address + length do
@@ -2309,11 +3270,13 @@ RESET()
 
 function Emulator.Run()
   while true do
-    EmulateCPU()
-  
-    EmulatePPU()
-    EmulatePPU()
-    EmulatePPU()
+    if CPUClock == 11 then
+      EmulateCPU()
+    end
+    if CPUClock % 4 == 3 then
+      EmulatePPU()
+    end
+    CPUClock = (CPUClock + 1) % 12
     
     if DrawFrame then
       DrawFrame = false
