@@ -55,6 +55,7 @@ local VRAMAddress = 0
 local TransferAddress = 0
 local VRAMInc32Mode = false
 
+local PPUDataBus = 0
 local CHRData = ffi.new("uint8_t[0x2000]")
 local VRAM = ffi.new("uint8_t[0x800]")
 local PaletteRAM = ffi.new("uint8_t[32]")
@@ -171,14 +172,15 @@ function Read(address)
   elseif address < 0x4000 then
     address = band(address, 0x2007)
     if address == 0x2002 then
-      local ppustatus = 0
-      ppustatus = bor(ppustatus, Vblank and 0x80 or 0)
-      ppustatus = bor(ppustatus, SpriteZeroHit and 0x40 or 0)
-      ppustatus = bor(ppustatus, SpriteOverflow and 0x20 or 0)
+      PPUDataBus = band(PPUDataBus, 0x1F)
+      PPUDataBus = bor(PPUDataBus, Vblank and 0x80 or 0)
+      PPUDataBus = bor(PPUDataBus, SpriteZeroHit and 0x40 or 0)
+      PPUDataBus = bor(PPUDataBus, SpriteOverflow and 0x20 or 0)
+      
       Vblank = false
       WriteLatch = false
       
-      DataBus = ppustatus
+      DataBus = PPUDataBus
     elseif address == 0x2007 then
       local temp = PPUBuffer
       if VRAMAddress >= 0x3F00 then
@@ -192,17 +194,20 @@ function Read(address)
       VRAMAddress = band(VRAMAddress, 0x3FFF)
       
       DataBus = temp
+      PPUDataBus = temp
+    else
+      DataBus = PPUDataBus
     end
   elseif address == 0x4016 then
     local cbit = rshift(band(Controller1ShiftReg, 0x80), 7)
     Controller1ShiftReg = lshift(Controller1ShiftReg, 1)
     
-    DataBus = cbit
+    DataBus = bor(band(DataBus, 0xE0), cbit)
   elseif address == 0x4017 then
     local cbit = rshift(band(Controller2ShiftReg, 0x80), 7)
     Controller2ShiftReg = lshift(Controller2ShiftReg, 1)
     
-    DataBus = cbit
+    DataBus = bor(band(DataBus, 0xE0), cbit)
   elseif band(Header[6], 2) == 1 and address >= 0x6000 and address < 0x8000 then
     DataBus = PRGRAM[address - 0x6000]
   elseif address >= 0x8000 then
@@ -225,6 +230,8 @@ function Write(address, value)
       Use8x16Sprites = band(value, 0x20) ~= 0
       NMIEnabled = band(value, 0x80) ~= 0
       TransferAddress = bor(band(TransferAddress, bnot(0xC00)), lshift(band(NametableSelect, 3), 10))
+      
+      PPUDataBus = value
     elseif address == 0x2001 then  --PPUMASK
       Grayscale = band(value, 1) ~= 0
       Mask8pxBg = band(value, 2) ~= 0
@@ -232,9 +239,14 @@ function Write(address, value)
       RenderBg = band(value, 8) ~= 0
       RenderSprites = band(value, 0x10) ~= 0
       EmphasisColor = band(rshift(value, 5), 7)
+      
+      PPUDataBus = value
     elseif address == 0x2002 then  --PPUSTATUS
+      PPUDataBus = value
     elseif address == 0x2003 then  --OAMADDR
+      PPUDataBus = value
     elseif address == 0x2004 then  --OAMDATA
+      PPUDataBus = value
     elseif address == 0x2005 then  --PPUSCROLL
       if not WriteLatch then
         FineX = band(value, 7)
@@ -246,6 +258,7 @@ function Write(address, value)
         TransferAddress = band(TransferAddress, 0xFFFF)
       end
       WriteLatch = not WriteLatch
+      PPUDataBus = value
     elseif address == 0x2006 then  --PPUADDR
       if not WriteLatch then
         TempVRAMAddress = band(lshift(band(value, 0x3F), 8), 0xFFFF)
@@ -254,6 +267,7 @@ function Write(address, value)
         TransferAddress = VRAMAddress 
       end
       WriteLatch = not WriteLatch
+      PPUDataBus = value
     elseif address == 0x2007 then  --PPUDATA
       if VRAMAddress < 0x2000 then --Write to pattern table (if possible)
         if Header[5] == 0 then
@@ -276,6 +290,8 @@ function Write(address, value)
       end
       VRAMAddress = VRAMAddress + (VRAMInc32Mode and 32 or 1)
       VRAMAddress = band(VRAMAddress, 0x3FFF)
+      
+      PPUDataBus = value
     end
   elseif address == 0x4014 then
     --OAM DMA (simplified)
@@ -330,10 +346,10 @@ local InstData = {
       Read(DoNMI and 0xFFFB or 0xFFFF)
       ProgramCounter = bor(lshift(DataBus, 8), DataLatch)
       
-      EndInstruction()
-      
       DoNMI = false
       DoIRQ = false
+      
+      EndInstruction()
     end
   end,
   --Read-Modify-Write----------------------------
@@ -2904,7 +2920,9 @@ function EmulatePPU()
   end
   
   if Scanline < 240 or Scanline == 261 then
-    EvaluateSprites()
+    if Scanline ~= 261 and (RenderBg or RenderSprites) then
+      EvaluateSprites()
+    end
     if (Dot > 0 and Dot <= 256) or (Dot > 320 and Dot <= 336) then
       if RenderBg or RenderSprites then
         if RenderBg then
@@ -3209,22 +3227,22 @@ end
 function FindCharacterAddress(slot) 
   if not Use8x16Sprites then --8x8
     if band(rshift(ShiftRegAttr[slot], 7), 1) == 0 then
-      return band((SpritePatternTable and 0x1000 or 0) + lshift(ShiftRegPatt[slot], 4) + (Scanline - ShiftRegYPos[slot]), 0xFFFF)
+      return (SpritePatternTable and 0x1000 or 0) + lshift(ShiftRegPatt[slot], 4) + (Scanline - ShiftRegYPos[slot])
     else
-      return band((SpritePatternTable and 0x1000 or 0) + lshift(ShiftRegPatt[slot], 4) + band((7 - (Scanline - ShiftRegYPos[slot])), 7), 0xFFFF)
+      return (SpritePatternTable and 0x1000 or 0) + lshift(ShiftRegPatt[slot], 4) + band((7 - (Scanline - ShiftRegYPos[slot])), 7)
     end
   else --8x16 (stupid)
     if band(rshift(ShiftRegAttr[slot], 7), 1) == 0 then
       if Scanline - ShiftRegYPos[slot] < 8 then
-        return band(bor((band(ShiftRegPatt[slot], 1) == 1 and 0x1000 or 0), band(lshift(ShiftRegPatt[slot], 4), 0xFE)) + (Scanline - ShiftRegYPos[slot]), 0xFFFF)
+        return bor((band(ShiftRegPatt[slot], 1) == 1 and 0x1000 or 0), lshift(band(ShiftRegPatt[slot], 0xFE), 4) + (Scanline - ShiftRegYPos[slot])) 
       else
-        return band(bor((band(ShiftRegPatt[slot], 1) == 1 and 0x1000 or 0), band(lshift(ShiftRegPatt[slot], 4), 0xFE) + 16) + band(Scanline - ShiftRegYPos[slot], 7), 0xFFFF)
+        return bor((band(ShiftRegPatt[slot], 1) == 1 and 0x1000 or 0), (lshift(band(ShiftRegPatt[slot], 0xFE), 4) + 16) + band(Scanline - ShiftRegYPos[slot], 7)) 
       end
     else
       if Scanline - ShiftRegYPos[slot] < 8 then
-        return band(bor((band(ShiftRegPatt[slot], 1) == 1 and 0x1000 or 0), band(lshift(ShiftRegPatt[slot], 4), 0xFE) + 16) + (band(Scanline - ShiftRegYPos[slot], 7) + 7), 0xFFFF)
+        return bor((band(ShiftRegPatt[slot], 1) == 1 and 0x1000 or 0), (lshift(band(ShiftRegPatt[slot], 0xFE), 4) + 16) - (band(Scanline - ShiftRegYPos[slot], 7)) + 7) 
       else
-        return band(bor((band(ShiftRegPatt[slot], 1) == 1 and 0x1000 or 0), band(lshift(ShiftRegPatt[slot], 4), 0xFE) + 7) + band(Scanline - ShiftRegYPos[slot], 7), 0xFFFF)
+        return bor((band(ShiftRegPatt[slot], 1) == 1 and 0x1000 or 0), (lshift(band(ShiftRegPatt[slot], 0xFE), 4) + 7) - band(Scanline - ShiftRegYPos[slot], 7)) 
       end
     end
   end
@@ -3253,7 +3271,7 @@ function CopyCHRData(address, length)
     CHRData[i - address] = ROM[i]
   end
 end
-local ROMToLoad = "AccuracyCoin.nes"
+local ROMToLoad = "Dig Dug (Japan).nes"
 function RESET()
   --TODO: Add RESET Flag and "Instruction"
   LoadROM("roms/" .. ROMToLoad)
