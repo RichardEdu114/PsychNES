@@ -35,7 +35,7 @@ function love.update(dt)
 end
 function love.draw()
   love.graphics.print("Framerate: " .. love.timer.getFPS(), 0, 0)
-  love.graphics.print("Emulator: " .. Ret, 0, 50)
+  love.graphics.print("Emulator: " .. Ret, 0, 25)
   
   Image:replacePixels(ImageData)
   love.graphics.draw(Image, 150, 50)
