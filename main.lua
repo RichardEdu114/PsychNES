@@ -21,7 +21,7 @@ end
 function love.update(dt) 
   Image, ImageData, Ret = Emulator.Run()
   
-  controller1 = 0
+  local controller1 = 0
   if joy1:isGamepadDown("dpright") then controller1 = bor(controller1, 0x01) end
   if joy1:isGamepadDown("dpleft") then controller1 = bor(controller1, 0x02) end
   if joy1:isGamepadDown("dpdown") then controller1 = bor(controller1, 0x04) end
@@ -32,11 +32,11 @@ function love.update(dt)
   if joy1:isGamepadDown("a") then controller1 = bor(controller1, 0x80) end
   
   Emulator.Controller1 = controller1
+  Image:replacePixels(ImageData)
 end
 function love.draw()
   love.graphics.print("Framerate: " .. love.timer.getFPS(), 0, 0)
   love.graphics.print("Emulator: " .. Ret, 0, 25)
   
-  Image:replacePixels(ImageData)
   love.graphics.draw(Image, 150, 50)
 end

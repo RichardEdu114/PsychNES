@@ -167,10 +167,25 @@ local ImagePointer = ffi.cast("Image_Pixel*", ImageData:getFFIPointer())
 local Image = love.graphics.newImage(ImageData)
 
 --APU Things (Side Note: I have no ideia what the majority of the terminology means, i may research this some day)
+--All lookups are taken from nesdev (Just go look each APU Channel for the specifics)
+local RateLUT = ffi.new("uint16_t[16]", {428, 380, 340, 320, 286, 254, 226, 214, 190, 160, 142, 128, 106,  84,  72,  54})
+
+ffi.cdef([[
+  typedef struct {
+    bool IRQEnabled, Loop, Silence, Empty;
+    uint8_t SampleBuffer, BitsRemaining, ShiftRegister, Output;
+    uint16_t Rate, Period, SampleAddress, SampleLength, BytesRemaining, Address;
+  } APU_DMC;
+]])
+
+local DMC = ffi.new("APU_DMC")
+local DMCInterruptFlag = false
+
 local SoundData = love.sound.newSoundData(44100 / 60 + 1, 44100, 16, 1)
 local SoundQueue = love.audio.newQueueableSource(44100, 16, 1)
 
 --CPU Functions
+--TODO: Possibly if it is faster replace the ppu if checks with a jump table.
 function Read(address)
   if address < 0x2000 then
     DataBus = RAM[band(address, 0x7FF)]
@@ -220,6 +235,46 @@ function Read(address)
   end
   return DataBus
 end
+local APUAddressTable = {
+  [0x4010] = function()
+    DMC.IRQEnabled = band(value, 0x80) == 1
+    DMC.Loop = band(value, 0x40) == 1
+    DMC.Rate = RateLUT[band(value, 0x0F)]
+    
+    if not DMC.IRQEnabled then
+      DMCInterruptFlag = false
+    end
+  end,
+  [0x4011] = function()
+    --Apparently sometimes this does not work correctly if outputting a clock
+    --TODO: See if this is accurate due to the above comment (Its probably not correct)
+    DMC.Output = band(value, 0x7F)
+  end,
+  [0x4012] = function()
+    --Taken from nesdev (https://www.nesdev.org/wiki/APU_DMC)
+    DMC.SampleAddress = 0xC000 + (value * 64)
+  end,
+  [0x4013] = function()
+    --Same as above
+    DMC.SampleLength = (value * 16) + 1
+  end,
+  [0x4014] = function()
+    --OAM DMA (simplified)
+    --TODO: un-sinplify this
+    for i = 0, 255 do
+      OAM[i] = Read(lshift(value, 8) + i)
+    end
+  end,
+  [0x4015] = function()
+    DMCInterruptFlag = false
+  end,
+  [0x4016] = function()
+    Controller1ShiftReg = Emulator.Controller1
+    Controller2ShiftReg = 0
+  end,
+  [0x4017] = function()
+  end
+}
 function Write(address, value)
   --TODO: Add Mapper Chips
   if address < 0x2000 then
@@ -297,15 +352,11 @@ function Write(address, value)
       
       PPUDataBus = value
     end
-  elseif address == 0x4014 then
-    --OAM DMA (simplified)
-    --TODO: un-sinplify this
-    for i = 0, 255 do
-      OAM[i] = Read(lshift(value, 8) + i)
+  elseif address <= 0x4017 then
+    local func = APUAddressTable[address]
+    if func ~= nil then
+      func()
     end
-  elseif address == 0x4016 then
-    Controller1ShiftReg = Emulator.Controller1
-    Controller2ShiftReg = 0
   elseif band(Header[6], 2) == 1 and address >= 0x6000 and address < 0x8000 then
     PRGRAM[address - 0x6000] = value
   end
@@ -2905,6 +2956,7 @@ function EndInstruction()
   if not PreviousNMI and NMIDetector then
     DoNMI = true
   end
+  --TODO: Add IRQs
   --Log Instructions Here
 end
 
@@ -3250,9 +3302,60 @@ end
 
 --APU Functions
 function EmulateAPU()
+  ClockDMC()
+  --TODO: Add the missing channels and sound
+end
+function ClockDMC()
+  --TODO: Do an actual DMA instead of faking it
+  if DMC.Empty and DMC.BytesRemaining > 0 then
+    --DMC DMA but bad
+    DMC.SampleBuffer = Read(DMC.Address)
+    DMC.Address = DMC.Address + 1
+    if DMC.Address > 0xFFFF then
+      DMC.Address = 0x8000
+    end
+    DMC.BytesRemaining = DMC.BytesRemaining - 1
+    if DMC.BytesRemaining == 0 and DMC.Loop then
+      DMC.Address = DMC.SampleAddress
+      DMC.BytesRemaining = DMC.SampleLength
+      DMC.Empty = false
+    elseif DMC.BytesRemaining == 0 and DMC.IRQEnabled then
+      DMCInterruptFlag = true
+      DMC.Empty = true
+    end
+  end
+  
+  if DMC.Period > 0 then
+    DMC.Period = DMC.Period - 1
+    return
+  else
+    DMC.Period = DMC.Rate
+  end
+  
+  if not DMC.Silence then
+    local bit = band(DMC.ShiftRegister, 1)
+    if bit == 1 and tonumber(DMC.Output) + 2 > 127 then
+      DMC.Output = DMC.Output + 2
+    elseif tonumber(DMC.Output) - 2 < 0 then
+      DMC.Output = DMC.Output - 2
+    end
+  end
+  DMC.ShiftRegister = rshift(DMC.ShiftRegister, 1)
+  DMC.BitsRemaining = DMC.BitsRemaining - 1
+  
+  if DMC.BitsRemaining == 0 then
+    DMC.BitsRemaining = 8
+    if DMC.Empty then
+      DMC.Silence = true
+    else
+      DMC.Silence = false
+      DMC.ShiftRegister = DMC.SampleBuffer
+    
+      DMC.Empty = true
+    end
+  end
 end
 
-local MapperId = 0
 --Other Functions
 function LoadROM(filepath)
   local data, message = love.filesystem.read(filepath)
@@ -3275,7 +3378,7 @@ function CopyCHRData(address, length)
     CHRData[i - address] = ROM[i]
   end
 end
-local ROMToLoad = "Mappy (Japan).nes"
+local ROMToLoad = "Bomberman (USA).nes"
 function RESET()
   --TODO: Add RESET Flag and "Instruction"
   LoadROM("roms/" .. ROMToLoad)
@@ -3308,7 +3411,6 @@ function Emulator.Run()
       
       SoundQueue:queue(SoundData)
       SoundQueue:play()
-      CurrentSample = 0
       
       break
     end
