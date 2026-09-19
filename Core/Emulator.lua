@@ -17,6 +17,7 @@ local RAM = ffi.new("uint8_t[0x800]")
 local PRGRAM = ffi.new("uint8_t[0x2000]")
 local ROM = {}
 local Header = ffi.new("uint8_t[16]")
+
 local DoNMI = false
 local DoIRQ = false
 local DoRESET = false
@@ -79,8 +80,17 @@ local BgPatternTable = false
 local Use8x16Sprites = false
 local NMIEnabled = false
 
-local OAM = ffi.new("uint8_t[256]")
-local SecondaryOAM = ffi.new("uint8_t[32]")
+--TODO: Find the crash due to buffer overflow (PRIORITY)
+--local OAM = ffi.new("uint8_t[256]")
+--local SecondaryOAM = ffi.new("uint8_t[32]")
+local OAM = {}
+for i = 0, 255 do
+  OAM[i] = 0
+end
+local SecondaryOAM = {}
+for i = 0, 31 do
+  SecondaryOAM[i] = 0
+end
 local SpriteZeroHit = false
 local SpriteOverflow = false
 local IsSpriteZero = false
@@ -168,7 +178,7 @@ local Image = love.graphics.newImage(ImageData)
 
 --APU Things (Side Note: I have no ideia what the majority of the terminology means, i may research this some day)
 --All lookups are taken from nesdev (Just go look each APU Channel for the specifics)
-local RateLUT = ffi.new("uint16_t[16]", {428, 380, 340, 320, 286, 254, 226, 214, 190, 160, 142, 128, 106,  84,  72,  54})
+local RateLUT = ffi.new("uint16_t[16]", {[0] = 428, 380, 340, 320, 286, 254, 226, 214, 190, 160, 142, 128, 106,  84,  72,  54})
 
 ffi.cdef([[
   typedef struct {
@@ -236,7 +246,7 @@ function Read(address)
   return DataBus
 end
 local APUAddressTable = {
-  [0x4010] = function()
+  [0x4010] = function(value)
     DMC.IRQEnabled = band(value, 0x80) == 1
     DMC.Loop = band(value, 0x40) == 1
     DMC.Rate = RateLUT[band(value, 0x0F)]
@@ -245,34 +255,41 @@ local APUAddressTable = {
       DMCInterruptFlag = false
     end
   end,
-  [0x4011] = function()
+  [0x4011] = function(value)
     --Apparently sometimes this does not work correctly if outputting a clock
     --TODO: See if this is accurate due to the above comment (Its probably not correct)
     DMC.Output = band(value, 0x7F)
   end,
-  [0x4012] = function()
+  [0x4012] = function(value)
     --Taken from nesdev (https://www.nesdev.org/wiki/APU_DMC)
     DMC.SampleAddress = 0xC000 + (value * 64)
   end,
-  [0x4013] = function()
+  [0x4013] = function(value)
     --Same as above
     DMC.SampleLength = (value * 16) + 1
   end,
-  [0x4014] = function()
+  [0x4014] = function(value)
     --OAM DMA (simplified)
     --TODO: un-sinplify this
     for i = 0, 255 do
       OAM[i] = Read(lshift(value, 8) + i)
     end
   end,
-  [0x4015] = function()
+  [0x4015] = function(value)
+    local EnableDMC = band(value, 0x20) == 1
+    if EnableDMC and DMC.BytesRemaining == 0 then
+      DMC.Address = DMC.SampleAddress
+      DMC.BytesRemaining = DMC.SampleLength
+    else
+      DMC.BytesRemaining = 0
+    end
     DMCInterruptFlag = false
   end,
-  [0x4016] = function()
+  [0x4016] = function(value)
     Controller1ShiftReg = Emulator.Controller1
     Controller2ShiftReg = 0
   end,
-  [0x4017] = function()
+  [0x4017] = function(value)
   end
 }
 function Write(address, value)
@@ -355,7 +372,7 @@ function Write(address, value)
   elseif address <= 0x4017 then
     local func = APUAddressTable[address]
     if func ~= nil then
-      func()
+      func(value)
     end
   elseif band(Header[6], 2) == 1 and address >= 0x6000 and address < 0x8000 then
     PRGRAM[address - 0x6000] = value
@@ -3302,6 +3319,7 @@ end
 
 --APU Functions
 function EmulateAPU()
+  --TODO: Fix DMC Channel (Why is this broken???????????)
   ClockDMC()
   --TODO: Add the missing channels and sound
 end
@@ -3334,9 +3352,9 @@ function ClockDMC()
   
   if not DMC.Silence then
     local bit = band(DMC.ShiftRegister, 1)
-    if bit == 1 and tonumber(DMC.Output) + 2 > 127 then
+    if bit == 1 and DMC.Output + 2 <= 127 then
       DMC.Output = DMC.Output + 2
-    elseif tonumber(DMC.Output) - 2 < 0 then
+    elseif DMC.Output - 2 >= 0 then
       DMC.Output = DMC.Output - 2
     end
   end
@@ -3417,7 +3435,7 @@ function Emulator.Run()
   end
   
   --TODO: Remove this placeholder thing
-  return Image, ImageData, "Me Love NES."
+  return Image, ImageData, DMC.BytesRemaining
 end
 
 return Emulator
