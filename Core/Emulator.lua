@@ -291,7 +291,7 @@ local APUAddressTable = {
     end
   end,
   [0x4015] = function(value)
-    local EnableDMC = band(value, 0x10) == 1
+    local EnableDMC = band(value, 0x10) ~= 0
     if EnableDMC and DMC.BytesRemaining == 0 then
       DMC.Address = DMC.SampleAddress
       DMC.BytesRemaining = DMC.SampleLength
