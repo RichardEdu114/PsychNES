@@ -80,7 +80,7 @@ local BgPatternTable = false
 local Use8x16Sprites = false
 local NMIEnabled = false
 
---TODO: Find the crash due to buffer overflow (PRIORITY)
+--TODO: Find the crash due to outside table write
 --local OAM = ffi.new("uint8_t[256]")
 --local SecondaryOAM = ffi.new("uint8_t[32]")
 local OAM = {}
@@ -191,6 +191,13 @@ ffi.cdef([[
 local DMC = ffi.new("APU_DMC")
 local DMCInterruptFlag = false
 
+local FrameInterruptFlag = false
+local Mode4Step = true
+local InterruptInibit = false
+
+local APUGetCycle = false --even = put cycle
+local APUCycleCount = 0
+
 local SoundData = love.sound.newSoundData(44100 / 60 + 1, 44100, 16, 1)
 local SoundQueue = love.audio.newQueueableSource(44100, 16, 1)
 
@@ -227,6 +234,14 @@ function Read(address)
     else
       DataBus = PPUDataBus
     end
+  elseif address == 0x4015 then
+    apustatus = 0
+    apustatus = bor(apustatus, DMCInterruptFlag and 0x80 or 0)
+    apustatus = bor(apustatus, FrameInterruptFlag and 0x40 or 0)
+    apustatus = bor(apustatus, DMC.BytesRemaining > 0 and 0x10 or 0)
+    
+    FrameInterruptFlag = false
+    DataBus = apustatus
   elseif address == 0x4016 then
     local cbit = rshift(band(Controller1ShiftReg, 0x80), 7)
     Controller1ShiftReg = lshift(Controller1ShiftReg, 1)
@@ -247,8 +262,8 @@ function Read(address)
 end
 local APUAddressTable = {
   [0x4010] = function(value)
-    DMC.IRQEnabled = band(value, 0x80) == 1
-    DMC.Loop = band(value, 0x40) == 1
+    DMC.IRQEnabled = band(value, 0x80) ~= 0
+    DMC.Loop = band(value, 0x40) ~= 0
     DMC.Rate = RateLUT[band(value, 0x0F)]
     
     if not DMC.IRQEnabled then
@@ -276,7 +291,7 @@ local APUAddressTable = {
     end
   end,
   [0x4015] = function(value)
-    local EnableDMC = band(value, 0x20) == 1
+    local EnableDMC = band(value, 0x10) == 1
     if EnableDMC and DMC.BytesRemaining == 0 then
       DMC.Address = DMC.SampleAddress
       DMC.BytesRemaining = DMC.SampleLength
@@ -290,6 +305,13 @@ local APUAddressTable = {
     Controller2ShiftReg = 0
   end,
   [0x4017] = function(value)
+    Mode4Step = band(value, 0x80) == 0
+    InterruptInibit = band(value, 0x40) ~= 0
+    
+    if InterruptInibit then
+      FrameInterruptFlag = false
+    end
+    APUCycleCount = 0
   end
 }
 function Write(address, value)
@@ -411,17 +433,17 @@ local InstData = {
     elseif CycleTick == 5 then
       --Is this here? Will look this later i guess.
       if DoIRQ then
-        IntereuptFlag = true
+        InterruptFlag = true
       end
       DataLatch = Read(DoNMI and 0xFFFA or 0xFFFE)
     elseif CycleTick == 6 then
       Read(DoNMI and 0xFFFB or 0xFFFF)
       ProgramCounter = bor(lshift(DataBus, 8), DataLatch)
       
+      EndInstruction()
+      
       DoNMI = false
       DoIRQ = false
-      
-      EndInstruction()
     end
   end,
   [0x06] = function() --ASL <$??
@@ -2630,18 +2652,12 @@ local InstData = {
     
       EndInstruction()
     end
-  end,
-  [0x100] = function() --OAM DMA
-    EndInstruction()
-  end,
-  [0x101] = function() --DMC DMA
-    EndInstruction()
   end
 }
 local opcode = 0
 function EmulateCPU()
   if CycleTick == 0 then
-    if not DoNMI then
+    if not DoNMI and not DoIRQ then
       opcode = Read(ProgramCounter)
       ProgramCounter = band(ProgramCounter + 1, 0xFFFF)
     else
@@ -2973,7 +2989,13 @@ function EndInstruction()
   if not PreviousNMI and NMIDetector then
     DoNMI = true
   end
-  --TODO: Add IRQs
+  if (DMCInterruptFlag or FrameInterruptFlag) and not InterruptFlag then
+    DoIRQ = true
+  end
+  if DoNMI and DoIRQ then
+    DoIRQ = false --NMI has priority
+  end
+  
   --Log Instructions Here
 end
 
@@ -3318,10 +3340,34 @@ function FindCharacterAddress(slot)
 end
 
 --APU Functions
+--TODO: Add the missing channels and sound
 function EmulateAPU()
+  APUGetCycle = not APUGetCycle
+  if APUGetCycle then
+    APUCycleCount = APUCycleCount + 1
+  end
+  if Mode4Step then
+    if (APUCycleCount == 14914 or APUCycleCount == 14915) and not InterruptInibit then
+      FrameInterruptFlag = true
+    end
+    if APUCycleCount == 3278 and not APUGetCycle then
+    elseif APUCycleCount == 7456 and not APUGetCycle then
+    elseif APUCycleCount == 11185 and not APUGetCycle then
+    elseif APUCycleCount == 14914 and not APUGetCycle then
+    elseif APUCycleCount == 14915 and APUGetCycle then
+      APUCycleCount = 0
+    end
+  else
+    if APUCycleCount == 3278 and not APUGetCycle then
+    elseif APUCycleCount == 7456 and not APUGetCycle then
+    elseif APUCycleCount == 11185 and not APUGetCycle then
+    elseif APUCycleCount == 18640 and not APUGetCycle then
+    elseif APUCycleCount == 18641 and APUGetCycle then
+      APUCycleCount = 0
+    end
+  end
   --TODO: Fix DMC Channel (Why is this broken???????????)
   ClockDMC()
-  --TODO: Add the missing channels and sound
 end
 function ClockDMC()
   --TODO: Do an actual DMA instead of faking it
@@ -3392,11 +3438,11 @@ function LoadROM(filepath)
   --TODO: Add NES 2.0 Support
 end
 function CopyCHRData(address, length)
-  for i = address, address + length do
+  for i = address, (address + length) - 1 do
     CHRData[i - address] = ROM[i]
   end
 end
-local ROMToLoad = "Bomberman (USA).nes"
+local ROMToLoad = "AccuracyCoin.nes"
 function RESET()
   --TODO: Add RESET Flag and "Instruction"
   LoadROM("roms/" .. ROMToLoad)
@@ -3435,7 +3481,7 @@ function Emulator.Run()
   end
   
   --TODO: Remove this placeholder thing
-  return Image, ImageData, DMC.BytesRemaining
+  return Image, ImageData, tostring(InterruptInibit)
 end
 
 return Emulator
