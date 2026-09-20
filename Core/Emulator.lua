@@ -431,10 +431,6 @@ local InstData = {
       Write(0x100 + SP, Temp)
       SP = band(SP - 1, 0xFF)
     elseif CycleTick == 5 then
-      --Is this here? Will look this later i guess.
-      if DoIRQ then
-        InterruptFlag = true
-      end
       DataLatch = Read(DoNMI and 0xFFFA or 0xFFFE)
     elseif CycleTick == 6 then
       Read(DoNMI and 0xFFFB or 0xFFFF)
@@ -444,6 +440,10 @@ local InstData = {
       
       DoNMI = false
       DoIRQ = false
+      
+      if DoIRQ then
+        InterruptFlag = true
+      end
     end
   end,
   [0x06] = function() --ASL <$??
@@ -3371,23 +3371,24 @@ function EmulateAPU()
 end
 function ClockDMC()
   --TODO: Do an actual DMA instead of faking it
-  if DMC.Empty and DMC.BytesRemaining > 0 then
+  --[[if DMC.Empty and DMC.BytesRemaining > 0 then
     --DMC DMA but bad
     DMC.SampleBuffer = Read(DMC.Address)
     DMC.Address = DMC.Address + 1
-    if DMC.Address > 0xFFFF then
+    DMC.Empty = false
+    
+    if DMC.Address <= 0x8000 then
       DMC.Address = 0x8000
     end
     DMC.BytesRemaining = DMC.BytesRemaining - 1
     if DMC.BytesRemaining == 0 and DMC.Loop then
       DMC.Address = DMC.SampleAddress
       DMC.BytesRemaining = DMC.SampleLength
-      DMC.Empty = false
     elseif DMC.BytesRemaining == 0 and DMC.IRQEnabled then
       DMCInterruptFlag = true
       DMC.Empty = true
     end
-  end
+  end--]]
   
   if DMC.Period > 0 then
     DMC.Period = DMC.Period - 1
@@ -3442,7 +3443,7 @@ function CopyCHRData(address, length)
     CHRData[i - address] = ROM[i]
   end
 end
-local ROMToLoad = "AccuracyCoin.nes"
+local ROMToLoad = "Bomberman (USA).nes"
 function RESET()
   --TODO: Add RESET Flag and "Instruction"
   LoadROM("roms/" .. ROMToLoad)
@@ -3481,7 +3482,7 @@ function Emulator.Run()
   end
   
   --TODO: Remove this placeholder thing
-  return Image, ImageData, tostring(InterruptInibit)
+  return Image, ImageData, string.format("0x%04X", 0x4000 * Header[4])
 end
 
 return Emulator
