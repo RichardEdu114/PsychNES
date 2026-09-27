@@ -17,6 +17,8 @@ local RAM = ffi.new("uint8_t[0x800]")
 local PRGRAM = ffi.new("uint8_t[0x2000]")
 local ROM = {}
 local Header = ffi.new("uint8_t[16]")
+local CPUIsReading = true --Used for DMA
+local HaltCPU = false --Also used for DMA
 
 local DoNMI = false
 local DoIRQ = false
@@ -29,7 +31,8 @@ local InterruptFlag = true
 local OverflowFlag = false
 local NegativeFlag = false
 
-local DataBus = 0 --The most recently read/written value
+local DataBus = 0 --The most recently read/written value (Except for $4015)
+local InternalDataBus = 0 --Same as above but also includes $4015
 local DataLatch = 0 --Temporary value
 local AddressBus = 0 --Where is the cpu reading/writing after a addressing mode
 local CycleTick = 0 --What cycle is this instruction on
@@ -204,6 +207,8 @@ local SoundQueue = love.audio.newQueueableSource(44100, 16, 1)
 --CPU Functions
 --TODO: Possibly if it is faster replace the ppu if checks with a jump table.
 function Read(address)
+  CPUIsReading = true
+  
   if address < 0x2000 then
     DataBus = RAM[band(address, 0x7FF)]
   elseif address < 0x4000 then
@@ -235,13 +240,15 @@ function Read(address)
       DataBus = PPUDataBus
     end
   elseif address == 0x4015 then
-    apustatus = 0
+    local apustatus = band(DataBus, 0x20)
     apustatus = bor(apustatus, DMCInterruptFlag and 0x80 or 0)
     apustatus = bor(apustatus, FrameInterruptFlag and 0x40 or 0)
     apustatus = bor(apustatus, DMC.BytesRemaining > 0 and 0x10 or 0)
     
     FrameInterruptFlag = false
-    DataBus = apustatus
+    InternalDataBus = apustatus
+    
+    return InternalDataBus
   elseif address == 0x4016 then
     local cbit = rshift(band(Controller1ShiftReg, 0x80), 7)
     Controller1ShiftReg = lshift(Controller1ShiftReg, 1)
@@ -252,12 +259,14 @@ function Read(address)
     Controller2ShiftReg = lshift(Controller2ShiftReg, 1)
     
     DataBus = bor(band(DataBus, 0xE0), cbit)
-  elseif band(Header[6], 2) == 1 and address >= 0x6000 and address < 0x8000 then
+  elseif band(Header[6], 2) ~= 0 and address >= 0x6000 and address < 0x8000 then
     DataBus = PRGRAM[address - 0x6000]
   elseif address >= 0x8000 then
     --TODO: Add Mapper Chips
     DataBus = ROM[band(address - 0x8000, 0x4000 * Header[4] - 1)]
   end
+  
+  InternalDataBus = DataBus
   return DataBus
 end
 local APUAddressTable = {
@@ -284,10 +293,12 @@ local APUAddressTable = {
     DMC.SampleLength = (value * 16) + 1
   end,
   [0x4014] = function(value)
-    --OAM DMA (simplified)
-    --TODO: un-sinplify this
+    --OAM DMA
+    --DoOAM_DMA = true
+    
+    --OAM_DMAReadAddress = value
     for i = 0, 255 do
-      OAM[i] = Read(lshift(value, 8) + i)
+      OAM[i] = Read(value + i)
     end
   end,
   [0x4015] = function(value)
@@ -295,7 +306,7 @@ local APUAddressTable = {
     if EnableDMC and DMC.BytesRemaining == 0 then
       DMC.Address = DMC.SampleAddress
       DMC.BytesRemaining = DMC.SampleLength
-    else
+    elseif not EnableDMC then
       DMC.BytesRemaining = 0
     end
     DMCInterruptFlag = false
@@ -315,6 +326,8 @@ local APUAddressTable = {
   end
 }
 function Write(address, value)
+  CPUIsReading = false
+  
   --TODO: Add Mapper Chips
   if address < 0x2000 then
     RAM[band(address, 0x7FF)] = value
@@ -342,8 +355,13 @@ function Write(address, value)
     elseif address == 0x2002 then  --PPUSTATUS
       PPUDataBus = value
     elseif address == 0x2003 then  --OAMADDR
+      OAMAddress = value
+      
       PPUDataBus = value
     elseif address == 0x2004 then  --OAMDATA
+      OAM[OAMAddress] = value     
+      OAMAddress = band(OAMAddress + 1, 0xFF)
+      
       PPUDataBus = value
     elseif address == 0x2005 then  --PPUSCROLL
       if not WriteLatch then
@@ -396,7 +414,7 @@ function Write(address, value)
     if func ~= nil then
       func(value)
     end
-  elseif band(Header[6], 2) == 1 and address >= 0x6000 and address < 0x8000 then
+  elseif band(Header[6], 2) ~= 0 and address >= 0x6000 and address < 0x8000 then
     PRGRAM[address - 0x6000] = value
   end
   DataBus = value --I did not know that even writing updated the data bus bruh
@@ -441,9 +459,7 @@ local InstData = {
       DoNMI = false
       DoIRQ = false
       
-      if DoIRQ then
-        InterruptFlag = true
-      end
+      InterruptFlag = true
     end
   end,
   [0x06] = function() --ASL <$??
@@ -2654,7 +2670,10 @@ local InstData = {
     end
   end
 }
+
 local opcode = 0
+local OAMCycleTick = 0
+local DMCCycleTick = 0
 function EmulateCPU()
   if CycleTick == 0 then
     if not DoNMI and not DoIRQ then
@@ -2665,12 +2684,13 @@ function EmulateCPU()
     end
     CycleTick = CycleTick + 1
   else
-    local opcode = InstData[opcode]    
-    opcode()
+    local func = InstData[opcode]    
+    func()
     
     CycleTick = CycleTick + 1
   end
 end
+
 --Official Opcodes
 function OpADC(value)
   local sum = value + A + (CarryFlag and 1 or 0)
@@ -3371,9 +3391,10 @@ function EmulateAPU()
 end
 function ClockDMC()
   --TODO: Do an actual DMA instead of faking it
-  --[[if DMC.Empty and DMC.BytesRemaining > 0 then
+  if DMC.Empty and DMC.BytesRemaining > 0 then
     --DMC DMA but bad
-    DMC.SampleBuffer = Read(DMC.Address)
+    DMC.SampleBuffer = math.random(0, 255) --TODO: Remove the read/write conflict
+    --Read(DMC.Address)
     DMC.Address = DMC.Address + 1
     DMC.Empty = false
     
@@ -3388,7 +3409,7 @@ function ClockDMC()
       DMCInterruptFlag = true
       DMC.Empty = true
     end
-  end--]]
+  end
   
   if DMC.Period > 0 then
     DMC.Period = DMC.Period - 1
@@ -3443,7 +3464,7 @@ function CopyCHRData(address, length)
     CHRData[i - address] = ROM[i]
   end
 end
-local ROMToLoad = "Bomberman (USA).nes"
+local ROMToLoad = "AccuracyCoin.nes"
 function RESET()
   --TODO: Add RESET Flag and "Instruction"
   LoadROM("roms/" .. ROMToLoad)
@@ -3482,7 +3503,7 @@ function Emulator.Run()
   end
   
   --TODO: Remove this placeholder thing
-  return Image, ImageData, string.format("0x%04X", 0x4000 * Header[4])
+  return Image, ImageData, tostring(CPUHalt)
 end
 
 return Emulator
