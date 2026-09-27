@@ -182,7 +182,35 @@ local Image = love.graphics.newImage(ImageData)
 --APU Things (Side Note: I have no ideia what the majority of the terminology means, i may research this some day)
 --All lookups are taken from nesdev (Just go look each APU Channel for the specifics)
 local RateLUT = ffi.new("uint16_t[16]", {[0] = 428, 380, 340, 320, 286, 254, 226, 214, 190, 160, 142, 128, 106,  84,  72,  54})
+local LengthLUT = ffi.new("uint8_t[32]", {[0] = 10,254, 20,  2, 40,  4, 80,  6, 160,  8, 60, 10, 14, 12, 26, 14, 12, 16, 24, 18, 48, 20, 96, 22, 192, 24, 72, 26, 16, 28, 32, 30})
 
+ffi.cdef([[
+  typedef struct {
+    bool Loop, Constant, StartFlag;
+    uint8_t Period, Volume, DecayValue, Output;
+  } APU_Envelope;
+]])
+ffi.cdef([[
+  typedef struct {
+    bool Reload, Enabled, Halt;
+    uint8_t ReloadValue, Period;
+  } APU_Length;
+]])
+ffi.cdef([[
+  typedef struct {
+    bool Enabled, Negate, Reload, Mute;
+    uint8_t Period, ShiftCount, ReloadValue;
+  } APU_Sweep;
+]])
+ffi.cdef([[
+  typedef struct {
+    uint8_t Duty;
+    uint16_t Timer;
+    APU_Length LengthCounter;
+    APU_Envelope Envelope;
+    APU_Sweep Sweep;
+  } APU_Pulse;
+]])
 ffi.cdef([[
   typedef struct {
     bool IRQEnabled, Loop, Silence, Empty;
@@ -191,6 +219,8 @@ ffi.cdef([[
   } APU_DMC;
 ]])
 
+local Pulse1 = ffi.new("APU_Pulse")
+local Pulse2 = ffi.new("APU_Pulse")
 local DMC = ffi.new("APU_DMC")
 local DMCInterruptFlag = false
 
@@ -3371,23 +3401,111 @@ function EmulateAPU()
       FrameInterruptFlag = true
     end
     if APUCycleCount == 3278 and not APUGetCycle then
+      ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope})
     elseif APUCycleCount == 7456 and not APUGetCycle then
+      ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope})
+      ClockSweeps({Pulse1, Pulse2})
+      ClockLengths({Pulse1.Length, Pulse2.Length})
     elseif APUCycleCount == 11185 and not APUGetCycle then
+      ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope})
     elseif APUCycleCount == 14914 and not APUGetCycle then
+      ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope})
+      ClockSweeps({Pulse1, Pulse2})
+      ClockLengths({Pulse1.Length, Pulse2.Length})
     elseif APUCycleCount == 14915 and APUGetCycle then
       APUCycleCount = 0
     end
   else
     if APUCycleCount == 3278 and not APUGetCycle then
+      ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope})
     elseif APUCycleCount == 7456 and not APUGetCycle then
+      ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope})
+      ClockSweeps({Pulse1, Pulse2})
+      ClockLengths({Pulse1.Length, Pulse2.Length})
     elseif APUCycleCount == 11185 and not APUGetCycle then
+      ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope})
+      ClockSweeps({Pulse1, Pulse2})
+      ClockLengths({Pulse1.Length, Pulse2.Length})
     elseif APUCycleCount == 18640 and not APUGetCycle then
+      ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope})
     elseif APUCycleCount == 18641 and APUGetCycle then
       APUCycleCount = 0
     end
   end
   --TODO: Fix DMC Channel (Why is this broken???????????)
   ClockDMC()
+end
+function ClockEnvelopes(EnvelopeTable)
+  for i = 1, #EnvelopeTable do
+    local Envelope = EnvelopeTable[i]
+    if not Envelope.StartFlag then
+      Envelope.Period = Envelope.Period - 1
+      if Envelope.Period == 0 then
+        Envelope.Period = Envelope.Volume + 1
+      
+        if Envelope.DecayValue > 0 then
+          Envelope.DecayValue = Envelope.DecayValue - 1
+        elseif Envelope.Loop then
+          Envelope.DecayValue = 15
+        end
+      end
+    else
+      Envelope.StartFlag = false
+      Envelope.DecayLevel = 15
+    
+      Envelope.Period = Envelope.Volume + 1
+    end
+    if Envelope.Constant then
+      Envelope.Output = Envelope.Volume
+    else
+      Envelope.Output = Envelope.DecayValue
+    end
+  end
+end
+function ClockSweeps(PulseTable)
+  for i = 1, 2 do
+    local Sweep = PulseTable[i].Sweep
+    local Pulse = PulseTable[i]
+    
+    local TargetPeriod = rshift(Pulse.Timer, Sweep.ShiftCount)
+    if Sweep.Negate then
+      if i == 1 then
+        TargetPeriod = (-TargetPeriod) - 1
+      else
+        TargetPeriod = -TargetPeriod
+      end
+    end
+    TargetPeriod = Pulse.Timer + TargetPeriod
+    if TargetPeriod < 0 then
+      TargetPeriod = 0
+    end
+    
+    Sweep.Mute = false
+    if PulsePeriod < 8 or TargetPeriod > 0x7FF then
+      Sweep.Mute = true
+    end
+    
+    if Sweep.Period == 0 and Sweep.Enabled and Sweep.ShiftCount > 0 then
+      if not Sweep.Mute then
+        Pulse.Timer = TargetPeriod
+      end
+    end
+    if Sweep.Period == 0 or Sweep.Reload then
+      Sweep.Period = Sweep.ReloadValue + 1
+      Sweep.Reload = false
+    end
+  end
+end
+function ClockLengths(APULengthTable)
+  for i = 1, #APULengthTable do
+    local Length = APULengthTable[i]
+    if not Length.Enabled then
+      Length.Period = 0
+    end
+    if Length.Period > 0 and not Length.Halt then
+      Length.Period = Length.Period - 1
+    end
+  end
 end
 function ClockDMC()
   --TODO: Do an actual DMA instead of faking it
@@ -3503,7 +3621,7 @@ function Emulator.Run()
   end
   
   --TODO: Remove this placeholder thing
-  return Image, ImageData, tostring(CPUHalt)
+  return Image, ImageData, tostring(Pulse1.Envelope.DecayValue)
 end
 
 return Emulator
