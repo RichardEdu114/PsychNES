@@ -298,7 +298,7 @@ local APUAddressTable = {
     
     --OAM_DMAReadAddress = value
     for i = 0, 255 do
-      OAM[i] = Read(value + i)
+      OAM[i] = Read(lshift(value, 8) + i)
     end
   end,
   [0x4015] = function(value)
