@@ -3405,13 +3405,13 @@ function EmulateAPU()
     elseif APUCycleCount == 7456 and not APUGetCycle then
       ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope})
       ClockSweeps({Pulse1, Pulse2})
-      ClockLengths({Pulse1.Length, Pulse2.Length})
+      ClockLengths({Pulse1.LengthCounter, Pulse2.LengthCounter})
     elseif APUCycleCount == 11185 and not APUGetCycle then
       ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope})
     elseif APUCycleCount == 14914 and not APUGetCycle then
       ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope})
       ClockSweeps({Pulse1, Pulse2})
-      ClockLengths({Pulse1.Length, Pulse2.Length})
+      ClockLengths({Pulse1.LengthCounter, Pulse2.LengthCounter})
     elseif APUCycleCount == 14915 and APUGetCycle then
       APUCycleCount = 0
     end
@@ -3421,18 +3421,17 @@ function EmulateAPU()
     elseif APUCycleCount == 7456 and not APUGetCycle then
       ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope})
       ClockSweeps({Pulse1, Pulse2})
-      ClockLengths({Pulse1.Length, Pulse2.Length})
+      ClockLengths({Pulse1.LengthCounter, Pulse2.LengthCounter})
     elseif APUCycleCount == 11185 and not APUGetCycle then
       ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope})
       ClockSweeps({Pulse1, Pulse2})
-      ClockLengths({Pulse1.Length, Pulse2.Length})
+      ClockLengths({Pulse1.LengthCounter, Pulse2.LengthCounter})
     elseif APUCycleCount == 18640 and not APUGetCycle then
       ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope})
     elseif APUCycleCount == 18641 and APUGetCycle then
       APUCycleCount = 0
     end
   end
-  --TODO: Fix DMC Channel (Why is this broken???????????)
   ClockDMC()
 end
 function ClockEnvelopes(EnvelopeTable)
@@ -3481,7 +3480,7 @@ function ClockSweeps(PulseTable)
     end
     
     Sweep.Mute = false
-    if PulsePeriod < 8 or TargetPeriod > 0x7FF then
+    if Pulse.Timer < 8 or TargetPeriod > 0x7FF then
       Sweep.Mute = true
     end
     
@@ -3511,7 +3510,7 @@ function ClockDMC()
   --TODO: Do an actual DMA instead of faking it
   if DMC.Empty and DMC.BytesRemaining > 0 then
     --DMC DMA but bad
-    DMC.SampleBuffer = math.random(0, 255) --TODO: Remove the read/write conflict
+    DMC.SampleBuffer = math.random(0, 127) --TODO: Remove the read/write conflict
     --Read(DMC.Address)
     DMC.Address = DMC.Address + 1
     DMC.Empty = false
