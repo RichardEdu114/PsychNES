@@ -183,6 +183,7 @@ local Image = love.graphics.newImage(ImageData)
 --All lookups are taken from nesdev (Just go look each APU Channel for the specifics)
 local RateLUT = ffi.new("uint16_t[16]", {[0] = 428, 380, 340, 320, 286, 254, 226, 214, 190, 160, 142, 128, 106,  84,  72,  54})
 local LengthLUT = ffi.new("uint8_t[32]", {[0] = 10,254, 20,  2, 40,  4, 80,  6, 160,  8, 60, 10, 14, 12, 26, 14, 12, 16, 24, 18, 48, 20, 96, 22, 192, 24, 72, 26, 16, 28, 32, 30})
+local DutyLUT = ffi.new("uint8_t[32]", {[0] = 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0})
 
 ffi.cdef([[
   typedef struct {
@@ -204,8 +205,9 @@ ffi.cdef([[
 ]])
 ffi.cdef([[
   typedef struct {
-    uint8_t Duty;
-    uint16_t Timer;
+    bool TickTimer;
+    uint8_t Duty, Sequence, Output;
+    uint16_t Timer, ReloadValue;
     APU_Length LengthCounter;
     APU_Envelope Envelope;
     APU_Sweep Sweep;
@@ -237,8 +239,6 @@ local SoundQueue = love.audio.newQueueableSource(44100, 16, 1)
 --CPU Functions
 --TODO: Possibly if it is faster replace the ppu if checks with a jump table.
 function Read(address)
-  CPUIsReading = true
-  
   if address < 0x2000 then
     DataBus = RAM[band(address, 0x7FF)]
   elseif address < 0x4000 then
@@ -274,7 +274,9 @@ function Read(address)
     apustatus = bor(apustatus, DMCInterruptFlag and 0x80 or 0)
     apustatus = bor(apustatus, FrameInterruptFlag and 0x40 or 0)
     apustatus = bor(apustatus, DMC.BytesRemaining > 0 and 0x10 or 0)
-    
+    apustatus = bor(apustatus, Pulse2.LengthCounter.Period > 0 and 2 or 0)
+    apustatus = bor(apustatus, Pulse1.LengthCounter.Period > 0 and 1 or 0)
+        
     FrameInterruptFlag = false
     InternalDataBus = apustatus
     
@@ -300,6 +302,68 @@ function Read(address)
   return DataBus
 end
 local APUAddressTable = {
+  --[0x4000] = function(value)
+  --end,
+  [0x4000] = function(value)
+    Pulse1.Duty = rshift(band(value, 0xC0), 6)
+    
+    Pulse1.LengthCounter.Halt = band(value, 0x20) ~= 0
+    
+    Pulse1.Envelope.Loop = Pulse1.LengthCounter.Halt
+    Pulse1.Envelope.Constant = band(value, 0x10) ~= 0
+    Pulse1.Envelope.Volume = band(value, 0x0F)
+  end,
+  [0x4001] = function(value)
+    Pulse1.Sweep.Enabled = band(value, 0x80) ~= 0
+    Pulse1.Sweep.ReloadValue = rshift(band(value, 0x70), 4)
+    Pulse1.Sweep.Negate = band(value, 8) ~= 0
+    Pulse1.Sweep.ShiftCount = band(value, 7)
+    
+    Pulse1.Sweep.Reload = true
+  end,
+  --TODO: Check if the sequence reload is only on address 0x4003 and 0x4007
+  [0x4002] = function(value)
+    Pulse1.ReloadValue = bor(band(Pulse1.ReloadValue, 0xFF00), value)
+  end,
+  [0x4003] = function(value)
+    Pulse1.ReloadValue = bor(band(Pulse1.ReloadValue, 0xFF), band(value, 7))    
+    if Pulse1.LengthCounter.Enabled then
+      Pulse1.LengthCounter.Period = LengthLUT[rshift(band(value, 0xF8), 3)]
+    end
+    
+    Pulse1.Sequence = 0   
+    Pulse1.Envelope.StartFlag = true
+  end,
+  [0x4004] = function(value)
+    Pulse2.Duty = rshift(band(value, 0xC0), 6)
+    
+    Pulse2.LengthCounter.Halt = band(value, 0x20) ~= 0
+    
+    Pulse2.Envelope.Loop = Pulse2.LengthCounter.Halt
+    Pulse2.Envelope.Constant = band(value, 0x10) ~= 0
+    Pulse2.Envelope.Volume = band(value, 0x0F)
+  end,
+  [0x4005] = function(value)
+    Pulse2.Sweep.Enabled = band(value, 0x80) ~= 0
+    Pulse2.Sweep.ReloadValue = rshift(band(value, 0x70), 4)
+    Pulse2.Sweep.Negate = band(value, 8) ~= 0
+    Pulse2.Sweep.ShiftCount = band(value, 7)
+    
+    Pulse2.Sweep.Reload = true
+  end,
+  --TODO: Check if the sequence reload is only on address 0x4003 and 0x4007
+  [0x4006] = function(value)
+    Pulse2.ReloadValue = bor(band(Pulse2.ReloadValue, 0xFF00), value)
+  end,
+  [0x4007] = function(value)
+    Pulse2.ReloadValue = bor(band(Pulse2.ReloadValue, 0xFF), band(value, 7))    
+    if Pulse2.LengthCounter.Enabled then
+      Pulse2.LengthCounter.Period = LengthLUT[rshift(band(value, 0xF8), 3)]
+    end
+    
+    Pulse2.Sequence = 0   
+    Pulse2.Envelope.StartFlag = true
+  end,
   [0x4010] = function(value)
     DMC.IRQEnabled = band(value, 0x80) ~= 0
     DMC.Loop = band(value, 0x40) ~= 0
@@ -311,7 +375,7 @@ local APUAddressTable = {
   end,
   [0x4011] = function(value)
     --Apparently sometimes this does not work correctly if outputting a clock
-    --TODO: See if this is accurate due to the above comment (Its probably not correct)
+    --TODO: See if this is accurate due to the above comment
     DMC.Output = band(value, 0x7F)
   end,
   [0x4012] = function(value)
@@ -323,7 +387,7 @@ local APUAddressTable = {
     DMC.SampleLength = (value * 16) + 1
   end,
   [0x4014] = function(value)
-    --OAM DMA
+    --OAM DMA (but bad)
     --DoOAM_DMA = true
     
     --OAM_DMAReadAddress = value
@@ -332,6 +396,15 @@ local APUAddressTable = {
     end
   end,
   [0x4015] = function(value)
+    Pulse1.LengthCounter.Enabled = band(value, 1) ~= 0
+    Pulse2.LengthCounter.Enabled = band(value, 2) ~= 0
+    if not Pulse1.LengthCounter.Enabled then
+      Pulse1.LengthCounter.Period = 0
+    end
+    if not Pulse2.LengthCounter.Enabled then
+      Pulse2.LengthCounter.Period = 0
+    end
+    
     local EnableDMC = band(value, 0x10) ~= 0
     if EnableDMC and DMC.BytesRemaining == 0 then
       DMC.Address = DMC.SampleAddress
@@ -349,15 +422,19 @@ local APUAddressTable = {
     Mode4Step = band(value, 0x80) == 0
     InterruptInibit = band(value, 0x40) ~= 0
     
+    if not Mode4Step then
+      ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope})
+      ClockSweeps({Pulse1, Pulse2})
+      ClockLengths({Pulse1.LengthCounter, Pulse2.LengthCounter})
+    end
+    
     if InterruptInibit then
       FrameInterruptFlag = false
     end
     APUCycleCount = 0
   end
 }
-function Write(address, value)
-  CPUIsReading = false
-  
+function Write(address, value)  
   --TODO: Add Mapper Chips
   if address < 0x2000 then
     RAM[band(address, 0x7FF)] = value
@@ -1074,7 +1151,7 @@ local InstData = {
     getAddrAbsOffX(true)
     if CycleTick == 4 then
       A = Read(AddressBus) 
-
+      
       NegativeFlag = A > 127 
       ZeroFlag = A == 0
       EndInstruction()
@@ -2647,12 +2724,12 @@ local InstData = {
     getAddrAbs()
     if CycleTick == 3 then
       Read(AddressBus)
-    
+      
       EndInstruction()
     end
   end,
   [0x1C] = function() --NOP $????, X
-    getAddrAbsOffX()
+    getAddrAbsOffX(true)
     if CycleTick == 4 then
       Read(AddressBus)
     
@@ -2660,7 +2737,7 @@ local InstData = {
     end
   end,
   [0x3C] = function() --NOP $????, X
-    getAddrAbsOffX()
+    getAddrAbsOffX(true)
     if CycleTick == 4 then
       Read(AddressBus)
     
@@ -2668,7 +2745,7 @@ local InstData = {
     end
   end,
   [0x5C] = function() --NOP $????, X
-    getAddrAbsOffX()
+    getAddrAbsOffX(true)
     if CycleTick == 4 then
       Read(AddressBus)
     
@@ -2676,7 +2753,7 @@ local InstData = {
     end
   end,
   [0x7C] = function() --NOP $????, X
-    getAddrAbsOffX()
+    getAddrAbsOffX(true)
     if CycleTick == 4 then
       Read(AddressBus)
     
@@ -2684,7 +2761,7 @@ local InstData = {
     end
   end,
   [0xDC] = function() --NOP $????, X
-    getAddrAbsOffX()
+    getAddrAbsOffX(true)
     if CycleTick == 4 then
       Read(AddressBus)
     
@@ -2692,7 +2769,7 @@ local InstData = {
     end
   end,
   [0xFC] = function() --NOP $????, X
-    getAddrAbsOffX()
+    getAddrAbsOffX(true)
     if CycleTick == 4 then
       Read(AddressBus)
     
@@ -2945,6 +3022,7 @@ function getAddrAbsOffX(isRead)
     TempAddr = band(bor(lshift(DataBus, 8), DataLatch) + X, 0xFFFF)
     AddressBus = bor(lshift(DataBus, 8), band(DataLatch + X, 0xFF))
     ProgramCounter = band(ProgramCounter + 1, 0xFFFF)
+    
     if band(TempAddr, 0xFF00) == band(AddressBus, 0xFF00) and isRead then
       CycleTick = CycleTick + 1
     end
@@ -3210,8 +3288,9 @@ function EmulatePPU()
     ImagePointer[pixel].b = ColorData[coloridx].b
     ImagePointer[pixel].a = ColorData[coloridx].a
   end
+  
   Dot = Dot + 1
-  if Dot > 341 then
+  if Dot > 340 then
     Dot = 0
     Scanline = Scanline + 1
     if Scanline > 261 then
@@ -3432,6 +3511,9 @@ function EmulateAPU()
       APUCycleCount = 0
     end
   end
+  if APUGetCycle then
+    ClockPulses({Pulse1, Pulse2})
+  end
   ClockDMC()
 end
 function ClockEnvelopes(EnvelopeTable)
@@ -3450,7 +3532,7 @@ function ClockEnvelopes(EnvelopeTable)
       end
     else
       Envelope.StartFlag = false
-      Envelope.DecayLevel = 15
+      Envelope.DecayValue = 15
     
       Envelope.Period = Envelope.Volume + 1
     end
@@ -3479,9 +3561,10 @@ function ClockSweeps(PulseTable)
       TargetPeriod = 0
     end
     
-    Sweep.Mute = false
     if Pulse.Timer < 8 or TargetPeriod > 0x7FF then
       Sweep.Mute = true
+    else
+      Sweep.Mute = false
     end
     
     if Sweep.Period == 0 and Sweep.Enabled and Sweep.ShiftCount > 0 then
@@ -3498,11 +3581,28 @@ end
 function ClockLengths(APULengthTable)
   for i = 1, #APULengthTable do
     local Length = APULengthTable[i]
-    if not Length.Enabled then
-      Length.Period = 0
-    end
     if Length.Period > 0 and not Length.Halt then
       Length.Period = Length.Period - 1
+    end
+  end
+end
+function ClockPulses(PulseTable)
+  for i = 1, 2 do
+    local Pulse = PulseTable[i]
+    if Pulse.Timer == 0 then
+      Pulse.Timer = Pulse.ReloadValue + 1
+      
+      Pulse.Sequence = band(Pulse.Sequence - 1, 7)      
+    else
+      if Pulse.TickTimer then
+        Pulse.Timer = Pulse.Timer - 1
+      end
+    end
+    Pulse.TickTimer = not Pulse.TickTimer
+    if DutyLUT[(Pulse.Duty * 8) + Pulse.Sequence] == 0 or Pulse.Sweep.Mute or Pulse.LengthCounter.Period == 0 or Pulse.Timer < 8 then
+      Pulse.Output = 0
+    else
+      Pulse.Output = Pulse.Envelope.Output
     end
   end
 end
@@ -3598,17 +3698,14 @@ RESET()
 
 function Emulator.Run()
   while true do
-    if CPUClock == 11 then
+    if CPUClock == 2 then
       EmulateCPU()
     end
-    if CPUClock % 4 == 3 then
-      EmulatePPU()
-    end
-    if CPUClock == 11 then
+    EmulatePPU()
+    if CPUClock == 2 then
       EmulateAPU()
     end
-    CPUClock = (CPUClock + 1) % 12
-    
+    CPUClock = (CPUClock + 1) % 3
     if DrawFrame then
       DrawFrame = false
       
@@ -3620,7 +3717,7 @@ function Emulator.Run()
   end
   
   --TODO: Remove this placeholder thing
-  return Image, ImageData, tostring(Pulse1.Envelope.DecayValue)
+  return Image, ImageData, tostring("Finally")
 end
 
 return Emulator
