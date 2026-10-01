@@ -1,3 +1,4 @@
+--TODO: Add comments when necessary
 local Emulator = {}
 
 Emulator.Controller1 = 0
@@ -44,14 +45,16 @@ local Controller2ShiftReg = 0
 local PPUBuffer = 0
 local TempVRAMAddress = 0
 
-local CPUClock = 0
+local CPUClock = 0 --Executes a instruction step every 12 cycles
+local PPUClock = 0 --Draws a dot every 4 cycles 
+local APUClock = 0 --Outputs audio every 12 or 24 cycles (depends on the channel)
 
 --PPU Things
 ffi.cdef([[
   typedef struct {
     uint8_t r, g, b, a;
   } Image_Pixel;
-]])
+]]) --A LÖVE image pixel
 
 local DrawFrame = false
 
@@ -84,6 +87,7 @@ local Use8x16Sprites = false
 local NMIEnabled = false
 
 --TODO: Find the crash due to outside table write
+--(This is also happening on other tables, it appears to be changing SecondaryOAMAddress for some reason)
 --local OAM = ffi.new("uint8_t[256]")
 --local SecondaryOAM = ffi.new("uint8_t[32]")
 local OAM = {}
@@ -185,6 +189,7 @@ local RateLUT = ffi.new("uint16_t[16]", {[0] = 428, 380, 340, 320, 286, 254, 226
 local LengthLUT = ffi.new("uint8_t[32]", {[0] = 10,254, 20,  2, 40,  4, 80,  6, 160,  8, 60, 10, 14, 12, 26, 14, 12, 16, 24, 18, 48, 20, 96, 22, 192, 24, 72, 26, 16, 28, 32, 30})
 local DutyLUT = ffi.new("uint8_t[32]", {[0] = 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0})
 
+--Other APU units
 ffi.cdef([[
   typedef struct {
     bool Loop, Constant, StartFlag;
@@ -203,6 +208,8 @@ ffi.cdef([[
     uint8_t Period, ShiftCount, ReloadValue;
   } APU_Sweep;
 ]])
+
+--APU channels
 ffi.cdef([[
   typedef struct {
     bool TickTimer;
@@ -253,6 +260,9 @@ function Read(address)
       WriteLatch = false
       
       DataBus = PPUDataBus
+    elseif address == 0x2004 then --You can only read from this address in most nes versions but not older ones
+      DataBus = OAM[OAMAddress]
+      PPUDataBus = DataBus 
     elseif address == 0x2007 then
       local temp = PPUBuffer
       if VRAMAddress >= 0x3F00 then
@@ -266,6 +276,7 @@ function Read(address)
       VRAMAddress = band(VRAMAddress, 0x3FFF)
       
       DataBus = temp
+      PPUDataBus = DataBus
     else
       DataBus = PPUDataBus
     end
@@ -415,8 +426,10 @@ local APUAddressTable = {
     DMCInterruptFlag = false
   end,
   [0x4016] = function(value)
-    Controller1ShiftReg = Emulator.Controller1
-    Controller2ShiftReg = 0
+    if band(value, 1) == 1 then
+      Controller1ShiftReg = Emulator.Controller1
+      Controller2ShiftReg = 0
+    end
   end,
   [0x4017] = function(value)
     Mode4Step = band(value, 0x80) == 0
@@ -1050,7 +1063,7 @@ local InstData = {
     elseif CycleTick == 3 then
       DataLatch = Read(AddressBus)
     elseif CycleTick == 4 then
-      --Apparently there's a mistake i guess when crossing a page boundary
+      --Apparently there's a mistake for when crossing a page boundary
       --The high byte of the Address Bus is not updated
       Read(bor(band(AddressBus, 0xFF00), band(AddressBus + 1, 0xFF)))
       ProgramCounter = bor(lshift(DataBus, 8), DataLatch)
@@ -1677,7 +1690,7 @@ local InstData = {
     end
   end,
   [0x91] = function() --STA (<$??), Y
-    getAddrIndY(true)
+    getAddrIndY(false)
     if CycleTick == 5 then
       Write(AddressBus, A)
       EndInstruction()
@@ -1705,14 +1718,14 @@ local InstData = {
     end
   end,
   [0x99] = function() --STA $????, Y
-    getAddrAbsOffY(true)
+    getAddrAbsOffY(false)
     if CycleTick == 4 then
       Write(AddressBus, A)
       EndInstruction()
     end
   end,
   [0x9D] = function() --STA $????, X
-    getAddrAbsOffX(true)
+    getAddrAbsOffX(false)
     if CycleTick == 4 then
       Write(AddressBus, A)
       EndInstruction()
@@ -3118,6 +3131,7 @@ function EndInstruction()
     DoNMI = true
   end
   if (DMCInterruptFlag or FrameInterruptFlag) and not InterruptFlag then
+    DidIRQ = true
     DoIRQ = true
   end
   if DoNMI and DoIRQ then
@@ -3471,10 +3485,6 @@ end
 --APU Functions
 --TODO: Add the missing channels and sound
 function EmulateAPU()
-  APUGetCycle = not APUGetCycle
-  if APUGetCycle then
-    APUCycleCount = APUCycleCount + 1
-  end
   if Mode4Step then
     if (APUCycleCount == 14914 or APUCycleCount == 14915) and not InterruptInibit then
       FrameInterruptFlag = true
@@ -3698,14 +3708,31 @@ RESET()
 
 function Emulator.Run()
   while true do
-    if CPUClock == 2 then
+    if CPUClock == 12 then
+      CPUClock = 0
+      
       EmulateCPU()
     end
-    EmulatePPU()
-    if CPUClock == 2 then
-      EmulateAPU()
+    if PPUClock == 4 then
+      PPUClock = 0
+      
+      EmulatePPU()
     end
-    CPUClock = (CPUClock + 1) % 3
+    if APUClock == 12 then
+      APUClock = 0
+      
+      EmulateAPU()
+      
+      APUGetCycle = not APUGetCycle
+      if APUGetCycle then
+        APUCycleCount = APUCycleCount + 1
+      end
+    end
+    
+    CPUClock = CPUClock + 1
+    PPUClock = PPUClock + 1
+    APUClock = APUClock + 1
+    
     if DrawFrame then
       DrawFrame = false
       
@@ -3717,7 +3744,7 @@ function Emulator.Run()
   end
   
   --TODO: Remove this placeholder thing
-  return Image, ImageData, tostring("Finally")
+  return Image, ImageData, tostring(DMC.Rate)
 end
 
 return Emulator
