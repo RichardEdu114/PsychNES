@@ -211,7 +211,7 @@ ffi.cdef([[
 ]])
 ffi.cdef([[
   typedef struct {
-    bool Reload, Controll;
+    bool Reload, ControllFlag;
     uint8_t ReloadValue, Period;
   } APU_Linear;
 ]])
@@ -330,8 +330,6 @@ function Read(address)
   return DataBus
 end
 local APUAddressTable = {
-  --[0x4000] = function(value)
-  --end,
   [0x4000] = function(value)
     Pulse1.Duty = rshift(band(value, 0xC0), 6)
     
@@ -379,7 +377,6 @@ local APUAddressTable = {
     
     Pulse2.Sweep.Reload = true
   end,
-  --TODO: Check if the sequence reload is only on address 0x4003 and 0x4007
   [0x4006] = function(value)
     Pulse2.ReloadValue = bor(band(Pulse2.ReloadValue, 0xFF00), value)
   end,
@@ -393,8 +390,8 @@ local APUAddressTable = {
     Pulse2.Envelope.StartFlag = true
   end,
   [0x4008] = function(value)
-    Triangle.LinearCounter.Controll = band(value, 0x80) ~= 0
-    Triangle.LengthCounter.Halt = Triangle.LinearCounter.Controll
+    Triangle.LinearCounter.ControllFlag = band(value, 0x80) ~= 0
+    Triangle.LengthCounter.Halt = Triangle.LinearCounter.ControllFlag
     
     Triangle.LinearCounter.ReloadValue = band(value, 0x7F)
   end,
@@ -406,6 +403,8 @@ local APUAddressTable = {
     if Triangle.LengthCounter.Enabled then
       Triangle.LengthCounter.Period = LengthLUT[rshift(band(value, 0xF8), 3)]
     end
+    
+    Triangle.LinearCounter.Reload = true
   end,
   [0x4010] = function(value)
     DMC.IRQEnabled = band(value, 0x80) ~= 0
@@ -3645,7 +3644,7 @@ function ClockLinearCounter(Linear)
   elseif Linear.Period > 0 then
     Linear.Period = Linear.Period - 1
   end
-  if not Linear.Controll then
+  if not Linear.ControllFlag then
     Linear.Reload = false
   end
 end
