@@ -1,4 +1,8 @@
 --TODO: Add comments when necessary
+--TODO: Add FFI for both the CPU and the PPU
+--TODO: Move everything into a separate file
+--TODO: Add mappers
+--TODO: Add special controllers
 local Emulator = {}
 
 Emulator.Controller1 = 0
@@ -189,6 +193,7 @@ local RateLUT = ffi.new("uint16_t[16]", {[0] = 428, 380, 340, 320, 286, 254, 226
 local LengthLUT = ffi.new("uint8_t[32]", {[0] = 10,254, 20,  2, 40,  4, 80,  6, 160,  8, 60, 10, 14, 12, 26, 14, 12, 16, 24, 18, 48, 20, 96, 22, 192, 24, 72, 26, 16, 28, 32, 30})
 local DutyLUT = ffi.new("uint8_t[32]", {[0] = 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0})
 local VolumeLUT = ffi.new("uint8_t[32]", {[0] = 15, 14, 13, 12, 11, 10,  9,  8,  7,  6,  5,  4,  3,  2,  1,  0,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15})
+local PeriodLUT = ffi.new("uint16_t[16]", {[0] = 4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068})
 
 --Other APU units
 ffi.cdef([[
@@ -238,6 +243,15 @@ ffi.cdef([[
 ]])
 ffi.cdef([[
   typedef struct {
+    bool NoiseMode;
+    uint8_t Output;
+    uint16_t Period, ReloadValue, ShiftRegister;
+    APU_Envelope Envelope;
+    APU_Length LengthCounter;
+  } APU_Noise;
+]])
+ffi.cdef([[
+  typedef struct {
     bool IRQEnabled, Loop, Silence, Empty;
     uint8_t SampleBuffer, BitsRemaining, ShiftRegister, Output;
     uint16_t Rate, Period, SampleAddress, SampleLength, BytesRemaining, Address;
@@ -246,9 +260,11 @@ ffi.cdef([[
 
 local Pulse1 = ffi.new("APU_Pulse")
 local Pulse2 = ffi.new("APU_Pulse")
+local Noise = ffi.new("APU_Noise")
 local Triangle = ffi.new("APU_Triangle")
 local DMC = ffi.new("APU_DMC")
 local DMCInterruptFlag = false
+Noise.ShiftRegister = 1
 
 local FrameInterruptFlag = false
 local Mode4Step = true
@@ -301,7 +317,10 @@ function Read(address)
     local apustatus = band(DataBus, 0x20)
     apustatus = bor(apustatus, DMCInterruptFlag and 0x80 or 0)
     apustatus = bor(apustatus, FrameInterruptFlag and 0x40 or 0)
+    
     apustatus = bor(apustatus, DMC.BytesRemaining > 0 and 0x10 or 0)
+    apustatus = bor(apustatus, Noise.LengthCounter.Period > 0 and 8 or 0)
+    apustatus = bor(apustatus, Triangle.LengthCounter.Period > 0 and 4 or 0)
     apustatus = bor(apustatus, Pulse2.LengthCounter.Period > 0 and 2 or 0)
     apustatus = bor(apustatus, Pulse1.LengthCounter.Period > 0 and 1 or 0)
         
@@ -406,6 +425,25 @@ local APUAddressTable = {
     
     Triangle.LinearCounter.Reload = true
   end,
+  [0x400C] = function(value)
+    Noise.LengthCounter.Halt = band(value, 0x20) ~= 0
+    
+    Noise.Envelope.Loop = Pulse1.LengthCounter.Halt
+    Noise.Envelope.Constant = band(value, 0x10) ~= 0
+    Noise.Envelope.Volume = band(value, 0x0F)
+  end,
+  [0x400E] = function(value)
+    Noise.ReloadValue = PeriodLUT[band(value, 15)]
+    
+    Noise.NoiseMode = band(value, 0x80) ~= 0
+  end,
+  [0x400F] = function(value)
+    if Noise.LengthCounter.Enabled then
+      Noise.LengthCounter.Period = LengthLUT[rshift(band(value, 0xF8), 3)]
+    end
+    
+    Noise.Envelope.StartFlag = true
+  end,
   [0x4010] = function(value)
     DMC.IRQEnabled = band(value, 0x80) ~= 0
     DMC.Loop = band(value, 0x40) ~= 0
@@ -441,11 +479,18 @@ local APUAddressTable = {
     Pulse1.LengthCounter.Enabled = band(value, 1) ~= 0
     Pulse2.LengthCounter.Enabled = band(value, 2) ~= 0
     Triangle.LengthCounter.Enabled = band(value, 4) ~= 0
+    Noise.LengthCounter.Enabled = band(value, 8) ~= 0
     if not Pulse1.LengthCounter.Enabled then
       Pulse1.LengthCounter.Period = 0
     end
     if not Pulse2.LengthCounter.Enabled then
       Pulse2.LengthCounter.Period = 0
+    end
+    if not Triangle.LengthCounter.Enabled then
+      Triangle.LengthCounter.Period = 0
+    end
+    if not Noise.LengthCounter.Enabled then
+      Noise.LengthCounter.Period = 0
     end
     
     local EnableDMC = band(value, 0x10) ~= 0
@@ -468,9 +513,9 @@ local APUAddressTable = {
     InterruptInibit = band(value, 0x40) ~= 0
     
     if not Mode4Step then
-      ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope})
+      ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope, Noise.Envelope})
       ClockSweeps({Pulse1, Pulse2})
-      ClockLengths({Pulse1.LengthCounter, Pulse2.LengthCounter, Triangle.LengthCounter})
+      ClockLengths({Pulse1.LengthCounter, Pulse2.LengthCounter, Triangle.LengthCounter, Noise.LengthCounter})
       ClockLinearCounter(Triangle.LinearCounter)
     end
     
@@ -572,8 +617,8 @@ function Write(address, value)
   end
   DataBus = value --I did not know that even writing updated the data bus bruh
 end
+
 --TODO: Organize Instructions
---TODO: Add Unnoficial Instructions
 --Site i used for cycle info: https://www.atarihq.com/danb/files/64doc.txt
 local InstData = {
   [0x00] = function() --BRK
@@ -2828,6 +2873,8 @@ local opcode = 0
 local OAMCycleTick = 0
 local DMCCycleTick = 0
 function EmulateCPU()
+  --Add DMA Units here.
+  --Note: Read from AddressBus instead of repeating the last cycle
   if CycleTick == 0 then
     if not DoNMI and not DoIRQ then
       opcode = Read(ProgramCounter)
@@ -3523,49 +3570,51 @@ function EmulateAPU()
       FrameInterruptFlag = true
     end
     if APUCycleCount == 3278 and not APUGetCycle then
-      ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope})
+      ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope, Noise.Envelope})
       ClockLinearCounter(Triangle.LinearCounter)
     elseif APUCycleCount == 7456 and not APUGetCycle then
-      ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope})
+      ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope, Noise.Envelope})
       ClockSweeps({Pulse1, Pulse2})
-      ClockLengths({Pulse1.LengthCounter, Pulse2.LengthCounter, Triangle.LengthCounter})
+      ClockLengths({Pulse1.LengthCounter, Pulse2.LengthCounter, Triangle.LengthCounter, Noise.LengthCounter})
       ClockLinearCounter(Triangle.LinearCounter)
     elseif APUCycleCount == 11185 and not APUGetCycle then
-      ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope})
+      ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope, Noise.Envelope})
       ClockLinearCounter(Triangle.LinearCounter)
     elseif APUCycleCount == 14914 and not APUGetCycle then
-      ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope})
+      ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope, Noise.Envelope})
       ClockSweeps({Pulse1, Pulse2})
-      ClockLengths({Pulse1.LengthCounter, Pulse2.LengthCounter, Triangle.LengthCounter})
+      ClockLengths({Pulse1.LengthCounter, Pulse2.LengthCounter, Triangle.LengthCounter, Noise.LengthCounter})
       ClockLinearCounter(Triangle.LinearCounter)
     elseif APUCycleCount == 14915 and APUGetCycle then
       APUCycleCount = 0
     end
   else
     if APUCycleCount == 3278 and not APUGetCycle then
-      ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope})
+      ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope, Noise.Envelope})
       ClockLinearCounter(Triangle.LinearCounter)
     elseif APUCycleCount == 7456 and not APUGetCycle then
-      ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope})
+      ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope, Noise.Envelope})
       ClockSweeps({Pulse1, Pulse2})
-      ClockLengths({Pulse1.LengthCounter, Pulse2.LengthCounter, Triangle.LengthCounter})
+      ClockLengths({Pulse1.LengthCounter, Pulse2.LengthCounter, Triangle.LengthCounter, Noise.LengthCounter})
       ClockLinearCounter(Triangle.LinearCounter)
     elseif APUCycleCount == 11185 and not APUGetCycle then
-      ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope})
+      ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope, Noise.Envelope})
       ClockSweeps({Pulse1, Pulse2})
-      ClockLengths({Pulse1.LengthCounter, Pulse2.LengthCounter, Triangle.LengthCounter})
+      ClockLengths({Pulse1.LengthCounter, Pulse2.LengthCounter, Triangle.LengthCounter, Noise.LengthCounter})
       ClockLinearCounter(Triangle.LinearCounter)
     elseif APUCycleCount == 18640 and not APUGetCycle then
-      ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope})
+      ClockEnvelopes({Pulse1.Envelope, Pulse2.Envelope, Noise.Envelope})
       ClockLinearCounter(Triangle.LinearCounter)
     elseif APUCycleCount == 18641 and APUGetCycle then
       APUCycleCount = 0
     end
   end
+  
   if APUGetCycle then
     ClockPulses({Pulse1, Pulse2})
   end
   ClockTriangle()
+  ClockNoise()
   ClockDMC()
 end
 function ClockEnvelopes(EnvelopeTable)
@@ -3660,6 +3709,7 @@ function ClockPulses(PulseTable)
         Pulse.Timer = Pulse.Timer - 1
       end
     end
+    
     Pulse.TickTimer = not Pulse.TickTimer
     if DutyLUT[(Pulse.Duty * 8) + Pulse.Sequence] == 0 or Pulse.Sweep.Mute or Pulse.LengthCounter.Period == 0 or Pulse.Timer < 8 then
       Pulse.Output = 0
@@ -3669,6 +3719,11 @@ function ClockPulses(PulseTable)
   end
 end
 function ClockTriangle()
+  if Triangle.LinearCounter.Period > 0 and Triangle.LengthCounter.Period > 0 then
+    Triangle.Output = VolumeLUT[Triangle.Sequence]
+    Triangle.Sequence = band(Triangle.Sequence + 1, 0x1F)
+  end
+  
   if Triangle.Timer > 0 then
     if Triangle.TickTimer then
       Triangle.Timer = Triangle.Timer - 1
@@ -3677,13 +3732,29 @@ function ClockTriangle()
     
     return
   else
-    Triangle.Timer = Triangle.ReloadValue
+    Triangle.Timer = Triangle.ReloadValue + 1
+  end
+end
+function ClockNoise()
+  if band(Noise.ShiftRegister, 1) == 1 or Noise.LengthCounter.Period == 0 then
+    Noise.Output = 0
+  else
+    Noise.Output = Noise.Envelope.Output
   end
   
-  if Triangle.LinearCounter.Period > 0 and Triangle.LengthCounter.Period > 0 then
-    Triangle.Output = VolumeLUT[Triangle.Sequence]
-    Triangle.Sequence = band(Triangle.Sequence + 1, 0x1F)
+  if Noise.Period > 0 then
+    Noise.Period = Noise.Period - 1
+    return
+  else
+    Noise.Period = Noise.ReloadValue + 1
   end
+  
+  local bit1 = band(Noise.ShiftRegister, 1)
+  local bit2 = rshift(band(Noise.ShiftRegister, Noise.NoiseMode and 0x40 or 2), Noise.NoiseMode and 6 or 1)
+  local xor = bxor(bit1, bit2)
+  
+  Noise.ShiftRegister = rshift(Noise.ShiftRegister, 1)
+  Noise.ShiftRegister = bor(band(Noise.ShiftRegister, 0x7FFF), lshift(xor, 14))
 end
 function ClockDMC()
   --TODO: Do an actual DMA instead of faking it
@@ -3775,6 +3846,16 @@ end
 
 RESET()
 
+--[[function toBinary(num, bits)
+  local tbl = {}
+  for count = bits - 1, 0, -1 do
+    local bit = band(num, 1)
+    num = rshift(num, 1)
+    
+    tbl[count + 1] = bit
+  end
+  return "0b" .. table.concat(tbl)
+end--]]
 function Emulator.Run()
   while true do
     if CPUClock == 12 then
@@ -3813,7 +3894,7 @@ function Emulator.Run()
   end
   
   --TODO: Remove this placeholder thing
-  return Image, ImageData, tostring(DMC.Rate)
+  return Image, ImageData, tostring("APU Done ig")
 end
 
 return Emulator
