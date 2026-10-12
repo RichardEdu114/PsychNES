@@ -22,8 +22,6 @@ local RAM = ffi.new("uint8_t[0x800]")
 local PRGRAM = ffi.new("uint8_t[0x2000]")
 local ROM = {}
 local Header = ffi.new("uint8_t[16]")
-local CPUIsReading = true --Used for DMA
-local HaltCPU = false --Also used for DMA
 
 local DoNMI = false
 local DoIRQ = false
@@ -39,15 +37,18 @@ local NegativeFlag = false
 local DataBus = 0 --The most recently read/written value (Except for $4015)
 local InternalDataBus = 0 --Same as above but also includes $4015
 local DataLatch = 0 --Temporary value
-local AddressBus = 0 --Where is the cpu reading/writing after a addressing mode
+local AddressBus = 0 --Where is the cpu reading/writing after a addressing mode/DMA do nothing cycles
 local CycleTick = 0 --What cycle is this instruction on
 local TempAddr = 0 --Temporary address for some addressing modes
 
+local CPURead = true --Used for DMA
+local HaltCPU = false --Also used for DMA
+local DoOAMDMA = false 
+local DoDMCDMA = false 
+local OAMDMAAddress = 0 --Used during OAM DMA
+
 local Controller1ShiftReg = 0
 local Controller2ShiftReg = 0
-
-local PPUBuffer = 0
-local TempVRAMAddress = 0
 
 local CPUClock = 0 --Executes a instruction step every 12 cycles
 local PPUClock = 0 --Draws a dot every 4 cycles 
@@ -61,6 +62,9 @@ ffi.cdef([[
 ]]) --A LÖVE image pixel
 
 local DrawFrame = false
+
+local PPUBuffer = 0
+local TempVRAMAddress = 0
 
 local WriteLatch = false
 local VRAMAddress = 0
@@ -279,6 +283,7 @@ local SoundQueue = love.audio.newQueueableSource(44100, 16, 1)
 --CPU Functions
 --TODO: Possibly if it is faster replace the ppu if checks with a jump table.
 function Read(address)
+  CPURead = true
   if address < 0x2000 then
     DataBus = RAM[band(address, 0x7FF)]
   elseif address < 0x4000 then
@@ -467,13 +472,9 @@ local APUAddressTable = {
     DMC.SampleLength = (value * 16) + 1
   end,
   [0x4014] = function(value)
-    --OAM DMA (but bad)
-    --DoOAM_DMA = true
-    
-    --OAM_DMAReadAddress = value
-    for i = 0, 255 do
-      OAM[i] = Read(lshift(value, 8) + i)
-    end
+    --OAM DMA    
+    DoOAMDMA = true
+    OAMDMAAddress = lshift(value, 8)
   end,
   [0x4015] = function(value)
     Pulse1.LengthCounter.Enabled = band(value, 1) ~= 0
@@ -525,7 +526,8 @@ local APUAddressTable = {
     APUCycleCount = 0
   end
 }
-function Write(address, value)  
+function Write(address, value) 
+  CPURead = false 
   --TODO: Add Mapper Chips
   if address < 0x2000 then
     RAM[band(address, 0x7FF)] = value
@@ -2873,9 +2875,7 @@ local opcode = 0
 local OAMCycleTick = 0
 local DMCCycleTick = 0
 function EmulateCPU()
-  --Add DMA Units here.
-  --Note: Read from AddressBus instead of repeating the last cycle
-  if CycleTick == 0 then
+  if CycleTick == 0 and not HaltCPU then
     if not DoNMI and not DoIRQ then
       opcode = Read(ProgramCounter)
       ProgramCounter = band(ProgramCounter + 1, 0xFFFF)
@@ -2883,12 +2883,42 @@ function EmulateCPU()
       opcode = 0
     end
     CycleTick = CycleTick + 1
-  else
+  elseif not HaltCPU then
     local func = InstData[opcode]    
     func()
     
     CycleTick = CycleTick + 1
   end
+  if DoOAMDMA or DoDMCDMA then
+    OAMDMA(false)
+  end
+end
+function OAMDMA(DMCRead)
+  if OAMCycleTick == 0 and CPURead then --Halt cycle
+    HaltCPU = true
+    OAMCycleTick = 1
+  elseif OAMCycleTick == 1 and APUGetCycle and not DMCRead then --Page read (put)
+    Read(OAMDMAAddress) 
+    
+    OAMDMAAddress = OAMDMAAddress + 1
+    OAMCycleTick = 2
+    return
+  elseif OAMCycleTick == 2 and not APUGetCycle then --OAM write (get)
+    Write(0x2004, DataBus)
+    
+    if band(OAMDMAAddress, 0xFF) == 0 then
+      HaltCPU = false      
+      OAMCycleTick = 0 
+      DoOAMDMA = false
+    
+      return
+    end
+    
+    OAMCycleTick = 1
+    return
+  end
+  
+  Read(AddressBus) --Aligment cycle/Halt cycle read
 end
 
 --Official Opcodes
@@ -3894,7 +3924,7 @@ function Emulator.Run()
   end
   
   --TODO: Remove this placeholder thing
-  return Image, ImageData, tostring("APU Done ig")
+  return Image, ImageData, tostring(string.format("0x%04X", OAMDMAAddress))
 end
 
 return Emulator
